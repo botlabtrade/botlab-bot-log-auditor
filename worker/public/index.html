@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BOTLAB Bot Log Auditor</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232448D8'/%3E%3Cpath d='M7 21l5-6 4 3 7-9' stroke='%2335C9A9' stroke-width='3' fill='none'/%3E%3C/svg%3E">
+<meta name="description" content="Upload a trading bot's trade history. An AI agent runs six statistical gates and writes a plain-English audit. Educational tool, not financial advice.">
+<link rel="stylesheet" href="/styles.css">
+<script src="/app.js" defer nonce="__CSP_NONCE__"></script>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="logo">
+      <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#2448D8"/><path d="M7 21l5-6 4 3 7-9" stroke="#35C9A9" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/><circle cx="23" cy="9" r="2.2" fill="#fff"/></svg>
+      <div>BOTLAB Bot Log Auditor<small>AI agent · statistical gates · plain-English audit</small></div>
+    </div>
+    <div class="spacer"></div>
+    <span class="pill" id="llmPill"><i></i><span>AI: …</span></span>
+    <span class="pill" id="payPill"><i></i><span>Payments: …</span></span>
+    <button class="icon" id="themeBtn" title="Toggle light/dark" aria-label="Toggle light or dark theme">◐</button>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <h1>Is your trading bot's edge real, or just luck?</h1>
+    <p>Upload your exchange trade history. The agent parses and normalises it, runs six statistical gates, cross-checks the numbers, and writes an honest audit with Cloudflare Workers AI. Your file is processed in memory and never stored. Educational only, not financial advice.</p>
+  </section>
+
+  <section class="card no-print">
+    <div class="grid2">
+      <div>
+        <h2>1 · Your trade log</h2>
+        <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose CSV file">
+          <strong>Drop a CSV here</strong> or click to choose<br><span class="hint">Bybit Closed P&amp;L, Binance futures trade history, or any CSV with a result column (r / pnl). Max 2 MB.</span>
+          <input type="file" id="file" accept=".csv,text/csv,text/plain" class="hidden">
+        </div>
+        <textarea id="csv" placeholder="…or paste CSV text here" aria-label="CSV text"></textarea>
+        <div class="samples" id="samples"><span class="hint" style="margin:4px 4px 0 0">Try a sample:</span></div>
+      </div>
+      <div>
+        <h2>2 · Settings</h2>
+        <label class="f" for="trials">Variants you tried before picking this one</label>
+        <input type="number" id="trials" min="1" value="20">
+        <p class="hint">Used by the Deflated Sharpe ratio. Be honest: more tries means more luck to discount.</p>
+        <label class="f" for="risk" style="margin-top:10px">Risk per trade in USD (optional)</label>
+        <input type="number" id="risk" min="0" step="any" placeholder="e.g. 20 → converts PnL to R">
+        <p class="hint">If your file has PnL only, this converts it to R multiples so the drawdown gate can be scored.</p>
+        <div class="row" style="margin-top:14px">
+          <button class="btn" id="runBtn">Run audit</button>
+        </div>
+        <div class="err" id="err" role="alert"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card hidden" id="progressCard">
+    <h2>Agent steps</h2>
+    <ul class="steps" id="steps"></ul>
+  </section>
+
+  <section id="results" class="hidden">
+    <div class="print-only"><h2>BOTLAB Bot Log Auditor · Pro audit</h2><p id="printMeta"></p></div>
+    <section class="card">
+      <div class="verdict" id="verdict"></div>
+      <div class="tiles" id="tiles"></div>
+      <svg class="curve" id="curve" viewBox="0 0 600 120" preserveAspectRatio="none" aria-label="Cumulative result"></svg>
+      <p class="hint" id="inputNote"></p>
+      <div class="sum-row" id="summary"></div>
+    </section>
+
+    <section class="card">
+      <h2>Gate results</h2>
+      <div class="tbl"><table id="gateTable"><thead><tr><th>Gate</th><th>Result</th><th>Detail</th></tr></thead><tbody></tbody></table></div>
+      <p class="hint" id="crossNote"></p>
+    </section>
+
+    <section class="card" id="reportCard">
+      <h2>Audit report <span class="hint" id="reportSrc"></span></h2>
+      <div class="report" id="report"></div>
+    </section>
+
+    <section class="card" id="proCard">
+      <h2>Pro audit</h2>
+      <p class="hint no-print" style="margin-top:0">Extended report, month-by-month table with green/red days, per-coin and per-side tables, a 10-point robustness checklist, and a printable report.</p>
+      <div class="row no-print" id="proActions">
+        <button class="btn demo hidden" id="demoBtn">Unlock Pro audit (demo, no payment)</button>
+        <button class="btn ghost hidden" id="printBtn">Print / save as PDF</button>
+      </div>
+      <div id="paypalButtons" class="no-print"></div>
+      <div class="notice hidden no-print" id="payNote"></div>
+      <div id="proBody" class="hidden">
+        <div class="report" id="proReport" style="margin-top:14px"></div>
+        <h2 style="margin-top:18px">Month by month</h2>
+        <div class="tbl"><table id="monthTable"><thead><tr><th>Month</th><th style="text-align:right">Trades</th><th style="text-align:right">Result</th><th style="text-align:right">Green days</th><th style="text-align:right">Red days</th></tr></thead><tbody></tbody></table></div>
+        <h2 style="margin-top:18px">Per coin</h2>
+        <div class="tbl"><table id="coinTable"><thead><tr><th>Coin</th><th style="text-align:right">Trades</th><th style="text-align:right">Win rate</th><th style="text-align:right">Result</th></tr></thead><tbody></tbody></table></div>
+        <p class="hint" id="sideNote"></p>
+      </div>
+    </section>
+
+    <section class="card no-print">
+      <h2>Ask about this audit</h2>
+      <div class="chatlog" id="chatlog"></div>
+      <form class="chatform" id="chatForm">
+        <input id="chatIn" placeholder="e.g. Why did G1 fail? What should I test next?" maxlength="1000" autocomplete="off" aria-label="Question">
+        <button class="btn" type="submit">Ask</button>
+      </form>
+    </section>
+  </section>
+
+  <footer>Open source (MIT) · <a href="https://github.com/botlabtrade/botlab-bot-log-auditor" rel="noopener">github.com/botlabtrade/botlab-bot-log-auditor</a> · Made by BOTLAB <a href="https://botlab.org.uk" rel="noopener">https://botlab.org.uk</a> · Educational tool, not financial advice.</footer>
+</main>
+</body>
+</html>

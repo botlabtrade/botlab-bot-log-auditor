@@ -1,0 +1,30 @@
+# BOTLAB Bot Log Auditor - hosted hackathon demo.
+# Standalone Worker on *.workers.dev. No routes on botlab.org.uk, no KV/D1/R2: nothing is stored.
+name = "botlab-auditor"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+preview_urls = false
+
+# The UI (public/) is served through the Worker so every response gets the CSP/security headers.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+# Cloudflare Workers AI (free tier daily allowance). Model name: AI_MODEL in src/report.js.
+[ai]
+binding = "AI"
+
+[vars]
+PRO_PRICE_USD = "4.99"
+# Payment mode when the PayPal secrets below are NOT set: "sb" (PayPal JS SDK, generic sandbox client id, no account needed) or "mock".
+PAYPAL_MODE = "sb"
+
+# Secrets - set by the owner with `npx wrangler secret put <NAME>`, never written in this file:
+#   PAYPAL_CLIENT_ID       PayPal Developer *sandbox* REST app client id
+#   PAYPAL_CLIENT_SECRET   PayPal Developer *sandbox* REST app secret
+# Without them the UI shows "Payments demo mode" and uses PAYPAL_MODE (sb buttons or mock unlock).
+
+[observability]
+enabled = false

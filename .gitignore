@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.env.*
+!.env.example
+*.pdf
+docs/screenshots/*.tmp
+
+# internal notes (not public)
+SUBMISSION.md
+HACKATHON_NOTES.md
+.pytest_cache/
+worker/node_modules/
+worker/.wrangler/
+worker/.dev.vars
+video/

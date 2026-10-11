@@ -1,0 +1,4 @@
+# Runtime: Python 3.10+ standard library only (http.server, urllib, csv, subprocess).
+# Optional: Node.js 18+ on PATH for the sandboxed gates.js cross-check.
+# Development / tests:
+pytest>=8

@@ -1,0 +1,16 @@
+{
+  "name": "botlab-auditor-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hosted demo of the BOTLAB Bot Log Auditor as a standalone Cloudflare Worker",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "test": "node --test \"test/*.test.js\"",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.149.0"
+  }
+}
