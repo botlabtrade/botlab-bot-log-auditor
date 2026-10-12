@@ -8,7 +8,21 @@ The paid "Pro audit" (PayPal Sandbox) adds a longer report and a PDF export.
 
 > Educational tool. Not financial advice. It never tells you to trade, and it never promises profits.
 
-![demo](docs/demo.gif) <!-- TODO: record the demo GIF; screenshots are in docs/screenshots/ -->
+**Live demo:** https://botlab-auditor.botsite.workers.dev · **Video (2:45):** https://youtu.be/oQc5DGtB8RY
+
+## How PayPal and AI are used (PayPal AI Hackathon)
+
+| Tool | Where | What it does |
+|---|---|---|
+| **PayPal JavaScript SDK** (sandbox) | `worker/public/app.js`, `worker/src/paypal.js` | Renders PayPal checkout buttons that unlock the Pro audit for USD 4.99 of sandbox (test) money. The hosted demo uses the public sandbox client id `sb` (order created and captured in the browser, then verified by the Worker). |
+| **PayPal Orders v2 REST API** (sandbox) | `worker/src/paypal.js`, `payments_paypal.py` | Server-side create order → buyer approves → server capture → Pro unlocked. Active when `PAYPAL_CLIENT_ID` / `PAYPAL_CLIENT_SECRET` sandbox secrets are set (`npx wrangler secret put …`). |
+| **Cloudflare Workers AI – Llama 3.3 70B Instruct** | `worker/src/report.js` | Writes the plain-English audit (verdict, failed gates and why, what to test next, risk warnings) and answers follow-up questions, grounded in the gate numbers. Falls back to a deterministic template if the model errors or drifts into advice. |
+| **Python agent + sandbox** (any LLM: Anthropic or OpenAI-compatible) | `agent.py`, `sandbox.py`, `llm.py` | Full agent version: the LLM maps unknown CSV columns and writes analysis code that runs in a restricted sandbox (no network, no subprocess, temp dir, timeout). |
+| **Cloudflare Workers** | `worker/` | Stateless hosting; uploaded files are processed in memory and never stored. |
+
+Setup: hosted version → see [`worker/README.md`](worker/README.md) (`npm install`, `npx wrangler deploy`); Python version → [Run locally](#run-locally) below.
+
+![screenshot](docs/screenshots/audit_desktop_dark.png)
 
 ## The problem
 
