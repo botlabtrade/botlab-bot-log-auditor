@@ -16,3 +16,6 @@ worker/node_modules/
 worker/.wrangler/
 worker/.dev.vars
 video/
+
+# Vietnamese owner guides live outside the repo (BOTLAB_launch/huong_dan_vi)
+*_VI.md

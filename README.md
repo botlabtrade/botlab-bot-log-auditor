@@ -85,7 +85,7 @@ G6 drawdown under 15R.
   in-process sandbox is used (local dev, Windows).
 - **Vultr Serverless Inference**: `LLM_PROVIDER=openai_compatible` (or `vultr`), `LLM_BASE_URL=https://api.vultrinference.com/v1`.
 - **Deploy**: `vultr/docker-compose.yml` (app + runner + Caddy with automatic HTTPS), `vultr/deploy.sh`,
-  Vietnamese guide `vultr/DEPLOY_VI.md`, notes and sources `vultr/VULTR_NOTES.md`.
+  step-by-step guide `vultr/DEPLOY.md`, notes and sources `vultr/VULTR_NOTES.md`.
 
 ## Run locally
 
