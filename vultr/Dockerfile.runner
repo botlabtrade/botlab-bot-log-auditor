@@ -1,0 +1,17 @@
+# BOTLAB sandbox runner image (build context: repo root)
+#   docker build -f vultr/Dockerfile.runner -t botlab-auditor-runner .
+# Runs model-written Python. Started by docker-compose with network_mode: none, read_only, tmpfs /tmp,
+# mem/cpu/pids limits, cap_drop ALL, no-new-privileges and the default seccomp profile.
+# Contains no secrets and no app code beyond sandbox.py.
+FROM python:3.12-slim-bookworm
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 RUNNER_SOCKET=/run/botlab/runner.sock TMPDIR=/tmp
+RUN groupadd --system --gid 10001 botlab \
+ && useradd --system --uid 10001 --gid botlab --no-create-home --shell /usr/sbin/nologin botlab \
+ && mkdir -p /run/botlab && chown botlab:botlab /run/botlab
+WORKDIR /app
+COPY sandbox.py LICENSE ./
+COPY vultr/runner/runner_server.py ./
+USER botlab
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD ["python", "runner_server.py", "--healthcheck"]
+CMD ["python", "runner_server.py"]

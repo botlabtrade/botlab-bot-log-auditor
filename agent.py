@@ -5,7 +5,9 @@
                   executed by Node inside the sandbox
   3. analysis   - the LLM writes a small Python analysis script; it runs in the sandbox
                   (falls back to a built-in script if the generated one fails)
-  4. report     - the LLM writes a plain-English audit from the computed FACTS only
+  4. agent loop - the LLM may request up to N follow-up analyses ("run_python" tool calls, see agent_loop.py);
+                  each runs in the sandbox (or the isolated runner container) and the result is fed back
+  5. report     - the LLM writes a plain-English audit from the computed FACTS only
 
 MIT License (c) 2026 BOTLAB
 """
@@ -15,9 +17,11 @@ import json
 import math
 import time
 
+import agent_loop
 import csv_normalize
 import gates
 import llm as llm_mod
+import runner_client
 import sandbox
 
 STEPS = [
@@ -25,6 +29,7 @@ STEPS = [
     ("gates", "Run 6 statistical gates"),
     ("crosscheck", "Cross-check with gates.js in sandbox"),
     ("analysis", "Sandboxed analysis code"),
+    ("agent", "Agent follow-up analyses (run_python loop)"),
     ("report", "Write audit report"),
 ]
 
@@ -44,6 +49,12 @@ class Progress:
     def done(self, sid, detail="", status="done"):
         ms = int((time.monotonic() - self._t.get(sid, time.monotonic())) * 1000)
         self._set(sid, status=status, detail=detail, ms=ms)
+
+    def add(self, sid, label, before="report"):
+        """Insert a dynamic step (e.g. one agent tool call) so the UI step stream shows it live."""
+        idx = next((i for i, s in enumerate(self.steps) if s["id"] == before), len(self.steps))
+        self.steps.insert(idx, {"id": sid, "label": label, "status": "pending", "detail": "", "ms": None})
+        self.cb([dict(s) for s in self.steps])
 
     def _set(self, sid, **kw):
         for s in self.steps:
@@ -85,7 +96,8 @@ def validate_analysis(out) -> bool:
     return isinstance(out, dict) and isinstance(out.get("monthly"), list) and isinstance(out.get("by_side"), dict)
 
 
-def run_analysis(parsed: dict, llm: llm_mod.BaseLLM, timeout: float = 8.0) -> tuple[dict | None, dict]:
+def run_analysis(parsed: dict, llm: llm_mod.BaseLLM, timeout: float = 8.0, runner=None) -> tuple[dict | None, dict]:
+    runner = runner or runner_client.get_runner()
     trades = json.dumps(parsed["rows"])
     attempts = []
     code_sources = []
@@ -96,7 +108,7 @@ def run_analysis(parsed: dict, llm: llm_mod.BaseLLM, timeout: float = 8.0) -> tu
     if llm.name != "mock":
         code_sources.append(("builtin", llm_mod.MOCK_ANALYSIS_CODE.strip()))
     for source, code in code_sources:
-        res = sandbox.run_python(code, {"trades.json": trades}, timeout=timeout)
+        res = runner.run_python(code, {"trades.json": trades}, timeout=timeout)
         out = None
         if res.ok:
             try:
@@ -112,8 +124,9 @@ def run_analysis(parsed: dict, llm: llm_mod.BaseLLM, timeout: float = 8.0) -> tu
 
 
 def run_audit(csv_text: str, trials: int = 20, risk_usd: float | None = None, llm: llm_mod.BaseLLM | None = None,
-              pro: bool = False, on_progress=None) -> dict:
+              pro: bool = False, on_progress=None, runner=None, agent_limits: dict | None = None) -> dict:
     llm = llm or llm_mod.get_llm()
+    runner = runner or runner_client.get_runner()
     p = Progress(on_progress)
     result = {"provider": llm.name, "model": llm.model, "pro": pro}
 
@@ -145,13 +158,32 @@ def run_audit(csv_text: str, trials: int = 20, risk_usd: float | None = None, ll
         p.done("crosscheck", "skipped (node not installed)", status="skip")
 
     p.start("analysis")
-    analysis, trace = run_analysis(parsed, llm)
+    analysis, trace = run_analysis(parsed, llm, runner=runner)
     result["analysis_trace"] = trace
     p.done("analysis", (f"{len(analysis['monthly'])} months analysed by {trace['attempts'][-1]['source']} code"
                         if analysis else "analysis failed (report continues without it)"),
            status="done" if analysis else "warn")
 
     facts = build_facts(parsed, r, analysis, trials)
+
+    p.start("agent")
+
+    def on_step(ev):
+        sid = f"agent-{ev['step']}"
+        if ev["phase"] == "start":
+            p.add(sid, f"↳ Step {ev['step']} · run_python: {ev.get('why') or 'follow-up analysis'}"[:160])
+            p.start(sid)
+        else:
+            p.done(sid, ("ok" if ev["ok"] else ("timed out" if ev["timed_out"] else "failed")) + f" · {ev['duration_s']}s",
+                   status="done" if ev["ok"] else "warn")
+
+    loop = agent_loop.run_agent_loop(parsed, facts, llm, runner=runner, limits=agent_limits, on_step=on_step)
+    result["agent_trace"] = loop
+    if loop["steps"]:
+        facts["agent"] = agent_loop.facts_view(loop)
+    n_ok = sum(1 for s in loop["steps"] if s["ok"])
+    p.done("agent", f"{len(loop['steps'])} tool calls ({n_ok} ok) · {loop['stopped']} · {loop['executor']}",
+           status="skip" if not loop["steps"] else ("done" if n_ok else "warn"))
     result["facts"] = facts
     curve = r["curve"]
     step = max(1, math.ceil(len(curve) / 400))

@@ -1,0 +1,104 @@
+# BOTLAB Bot Log Auditor on Vultr Cloud Compute
+#   cd vultr && cp .env.example .env && nano .env && docker compose up -d --build
+# Services:
+#   caddy  - public entry point, ports 80/443, automatic HTTPS when DOMAIN is set, plain HTTP on :80 otherwise
+#   app    - Python web app + agent (not published to the internet directly, only through caddy)
+#   runner - executes model-written Python: NO network at all, read-only rootfs, tmpfs /tmp, non-root,
+#            all capabilities dropped, no-new-privileges, mem/cpu/pids limits, Docker default seccomp.
+#            The app reaches it only through a unix socket on the shared "runner_sock" volume.
+name: botlab-auditor
+
+services:
+  runner:
+    build:
+      context: ..
+      dockerfile: vultr/Dockerfile.runner
+    image: botlab-auditor-runner:latest
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # (no seccomp override: Docker's default seccomp profile applies)
+    tmpfs:
+      - /tmp:size=64m,mode=1777,nosuid,nodev,noexec
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    pids_limit: 64
+    ulimits:
+      nofile: {soft: 256, hard: 256}
+    environment:
+      RUNNER_SOCKET: /run/botlab/runner.sock
+      RUNNER_MAX_CONCURRENCY: "2"
+      RUNNER_MAX_TIMEOUT_S: "20"
+      RUNNER_MAX_MEM_MB: "384"
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-}
+    volumes:
+      - runner_sock:/run/botlab
+    logging: &logging
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  app:
+    build:
+      context: ..
+      dockerfile: vultr/Dockerfile.app
+    image: botlab-auditor-app:latest
+    restart: unless-stopped
+    depends_on:
+      runner:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8000"
+      RUNNER_URL: unix:///run/botlab/runner.sock
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-}
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,nosuid,nodev
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 128
+    volumes:
+      - runner_sock:/run/botlab
+    expose:
+      - "8000"
+    networks: [web]
+    logging: *logging
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      SITE_ADDRESS: ${DOMAIN:-:80}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [web]
+    logging: *logging
+
+networks:
+  web: {}
+
+volumes:
+  runner_sock: {}
+  caddy_data: {}
+  caddy_config: {}

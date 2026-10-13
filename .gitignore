@@ -10,6 +10,7 @@ docs/screenshots/*.tmp
 # internal notes (not public)
 SUBMISSION.md
 HACKATHON_NOTES.md
+vultr/SUBMISSION_VULTR.md
 .pytest_cache/
 worker/node_modules/
 worker/.wrangler/

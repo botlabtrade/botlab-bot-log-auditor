@@ -47,7 +47,9 @@ compute or read them. This project turns those statistics into a short audit tha
    |          step 3  sandbox.py ──────> node vendor/gates.js   (original code, cross-check)
    |          step 4  llm.py   writes Python analysis code ──> sandbox.py (python -I -S)
    |                           (built-in script used if the generated code fails)
-   |          step 5  llm.py   writes the report from computed FACTS only
+   |          step 5  agent_loop.py  the LLM picks up to 4 follow-up analyses ("run_python" tool calls),
+   |                           each runs in the sandbox / runner container, results are fed back
+   |          step 6  llm.py   writes the report from computed FACTS only
    v
  llm.py  providers: anthropic | openai_compatible (Vultr Serverless Inference) | mock (offline)
  payments_paypal.py  PayPal REST v2 Orders, sandbox only: create -> approve -> capture -> unlock Pro
@@ -70,6 +72,20 @@ deployment should also run the app in a container or microVM.
 **The six gates** (from botlab-check-your-bot): G1 sample size vs MinTRL, G2 PSR/DSR (luck after N
 trials), G3 still working recently, G4 not reliant on a few coins or days, G5 no losing side, and
 G6 drawdown under 15R.
+
+## Vultr version (agent loop + isolated runner)
+
+- **Agentic loop** (`agent_loop.py`): after the gates, the LLM may call `run_python` up to `AGENT_MAX_STEPS`
+  (default 4) times with a plain-JSON protocol (`{"tool": "run_python", "why", "code"}` or `{"tool": "finish",
+  "summary"}`). Hard limits: steps, per-step timeout, output size, code size, total time budget. Every step is
+  streamed to the UI. The mock provider runs a deterministic 3-step plan, so it all works offline.
+- **Runner container** (`vultr/runner/runner_server.py`, `runner_client.py`): when `RUNNER_URL` is set,
+  model-written code runs in a separate container with no network, a read-only fs, tmpfs /tmp, a non-root user,
+  dropped capabilities and mem/CPU/pids limits. The app reaches it over a unix socket. Without `RUNNER_URL`, the
+  in-process sandbox is used (local dev, Windows).
+- **Vultr Serverless Inference**: `LLM_PROVIDER=openai_compatible` (or `vultr`), `LLM_BASE_URL=https://api.vultrinference.com/v1`.
+- **Deploy**: `vultr/docker-compose.yml` (app + runner + Caddy with automatic HTTPS), `vultr/deploy.sh`,
+  Vietnamese guide `vultr/DEPLOY_VI.md`, notes and sources `vultr/VULTR_NOTES.md`.
 
 ## Run locally
 
@@ -98,6 +114,9 @@ The app does not read `.env` files. Export the variables in your shell. `.env.ex
 | `PRO_PRICE_USD` | Default `4.99` |
 | `PUBLIC_BASE_URL` | Base URL PayPal redirects back to (default `http://127.0.0.1:8000`) |
 | `HOST`, `PORT` | Default `127.0.0.1:8000` |
+| `AGENT_MAX_STEPS`, `AGENT_STEP_TIMEOUT_S`, `AGENT_MAX_OUTPUT`, `AGENT_MAX_CODE`, `AGENT_TOTAL_BUDGET_S` | Agent loop limits (defaults 4, 6, 4000, 8000, 90; `AGENT_MAX_STEPS=0` disables it) |
+| `RUNNER_URL`, `RUNNER_TOKEN`, `RUNNER_FALLBACK_LOCAL` | Isolated runner (`unix:///run/botlab/runner.sock` or `http://host:port`). Fails closed unless the fallback is `1` |
+| `MAX_RUNNING_JOBS` | Concurrent audits (default 4); extra requests get HTTP 429 |
 
 Keys are read only from the environment. They are never logged, never returned to the browser and
 never passed to sandboxed code.
@@ -124,13 +143,15 @@ This project builds on botlab-check-your-bot.
 
 ## Tests
 
-`python -m pytest -q` runs 49 tests:
+`python -m pytest -q` runs the test suite:
 - parsing variants
 - parity with gates.js on the example CSVs and the normalised exchange exports
 - sandbox timeout, network, fs, subprocess and env isolation
 - the mock report, determinism, and fallbacks
 - Anthropic and OpenAI-compatible request shapes (mocked HTTP)
 - the PayPal create/capture flow (mocked HTTP), sandbox-only enforcement, and the PDF
+- the agent loop (step limit, timeout, output cap, invalid replies, LLM failure), the runner service and client,
+  and static checks of the Vultr Docker files
 
 ## Limitations and disclaimer
 

@@ -226,7 +226,10 @@ def run_node(script: str, inputs: dict[str, str] | None = None, timeout: float =
     def argv(wd):
         return [node, "--permission", f"--allow-fs-read={wd}", "--disallow-code-generation-from-strings",
                 f"--max-old-space-size={mem_mb}", "--require", "./netblock.js", "main.js"]
-    return run(argv, files, timeout, mem_mb)
+    # V8 reserves far more virtual address space than it uses, so an RLIMIT_AS equal to the heap size can stop
+    # Node from starting on Linux. The heap stays capped by --max-old-space-size (and by the container limit).
+    as_mb = int(os.environ.get("SANDBOX_NODE_AS_MB", max(mem_mb, 4096)))
+    return run(argv, files, timeout, as_mb)
 
 
 GATES_RUNNER_JS = r'''

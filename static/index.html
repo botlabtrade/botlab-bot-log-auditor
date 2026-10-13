@@ -198,6 +198,13 @@ footer{color:var(--muted);font-size:12px;margin-top:28px;text-align:center}
       <details style="margin-top:10px"><summary>Show sandbox execution trace</summary><div id="trace"></div></details>
     </section>
 
+    <section class="card hidden" id="agentCard">
+      <h2>Agent follow-up analyses <span class="hint">the model chose these checks; each ran as code in the sandbox</span></h2>
+      <p class="hint" id="agentMeta"></p>
+      <div class="report" id="agentSummary"></div>
+      <div id="agentSteps"></div>
+    </section>
+
     <section class="card">
       <h2>Ask about this audit</h2>
       <div class="chatlog" id="chatlog"></div>
@@ -230,7 +237,8 @@ $('#themeBtn').onclick = () => {
 /* config */
 fetch('/api/config').then(r => r.json()).then(c => {
   cfg = c;
-  $('#llmPill span').textContent = 'LLM: ' + c.llm.provider + (c.llm.provider === 'mock' ? ' (offline)' : '');
+  $('#llmPill span').textContent = 'LLM: ' + (c.llm.endpoint || c.llm.provider) + (c.llm.provider === 'mock' ? ' (offline)' : '');
+  if (c.llm.model && c.llm.provider !== 'mock') $('#llmPill').title = c.llm.model + (c.sandbox ? ' · sandbox: ' + c.sandbox : '');
   $('#payPill span').textContent = c.payments.label;
   if (!c.payments.enabled) $('#payPill').classList.add('off');
   c.samples.forEach(name => {
@@ -318,7 +326,17 @@ function render(job) {
   $('#monthTable tbody').innerHTML = months.length ? months.map(r => `<tr><td>${esc(r.month)}</td><td class="num">${r.n}</td><td class="num" style="color:var(${r.sum >= 0 ? '--pass' : '--fail'})">${fmt(r.sum, 2, true)} ${esc(u)}</td><td class="num">${r.win_days ?? '–'}</td><td class="num">${r.loss_days ?? '–'}</td></tr>`).join('') : '<tr><td colspan="5">No date column.</td></tr>';
   const tr = (res.analysis_trace && res.analysis_trace.attempts) || [];
   $('#trace').innerHTML = tr.map(a => `<p class="hint">source: <strong>${esc(a.source)}</strong> · ok: ${a.ok} · ${a.duration_s != null ? a.duration_s + 's' : ''}${a.timed_out ? ' · TIMED OUT' : ''}${a.error ? ' · ' + esc(a.error) : ''}</p>${a.code ? '<div class="mono">' + esc(a.code) + '</div>' : ''}${a.stderr ? '<div class="mono">' + esc(a.stderr) + '</div>' : ''}`).join('');
+  renderAgent(res.agent_trace);
   renderPro(job);
+}
+
+function renderAgent(at) {
+  if (!at || !at.steps || !at.steps.length) { $('#agentCard').classList.add('hidden'); return; }
+  $('#agentCard').classList.remove('hidden');
+  const L = at.limits || {};
+  $('#agentMeta').textContent = `${at.steps.length} tool calls · stopped: ${at.stopped} · executor: ${at.executor} · limits: ${L.max_steps} steps, ${L.step_timeout_s}s per step, ${L.max_output} chars output`;
+  $('#agentSummary').innerHTML = md(at.summary || '');
+  $('#agentSteps').innerHTML = at.steps.map(s => `<details style="margin-top:8px"><summary><span class="badge ${s.ok ? 'pass' : 'fail'}">${s.ok ? 'OK' : (s.timed_out ? 'TIMEOUT' : 'ERROR')}</span> Step ${s.step} · run_python · ${esc(s.why)} <span class="hint">${s.duration_s}s</span></summary>${s.code ? '<div class="mono">' + esc(s.code) + '</div>' : ''}<div class="mono">${esc(s.stdout || '')}${s.stderr ? '\n' + esc(s.stderr) : ''}</div></details>`).join('');
 }
 
 function renderPro(job) {

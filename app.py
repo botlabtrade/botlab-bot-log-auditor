@@ -21,8 +21,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import agent
+import agent_loop
 import llm as llm_mod
 import pdf_export
+import runner_client
 from payments_paypal import Payments, PayPalError
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +32,7 @@ STATIC = os.path.join(HERE, "static")
 SAMPLES = os.path.join(HERE, "samples")
 MAX_UPLOAD = 5 * 1024 * 1024
 MAX_JOBS = 200
+MAX_RUNNING_JOBS = int(os.environ.get("MAX_RUNNING_JOBS", "4"))  # protects LLM credits on a public deploy
 
 JOBS: dict[str, dict] = {}
 ORDERS: dict[str, str] = {}  # paypal order id -> audit id
@@ -41,7 +44,10 @@ ID_RE = re.compile(r"^[a-f0-9]{32}$")
 def provider_info():
     try:
         l = llm_mod.get_llm()
-        return {"provider": l.name, "model": l.model}
+        info = {"provider": l.name, "model": l.model}
+        if getattr(l, "endpoint_label", None):
+            info["endpoint"] = l.endpoint_label
+        return info
     except llm_mod.LLMError as e:
         return {"provider": "misconfigured", "model": str(e)}
 
@@ -52,7 +58,7 @@ def public_job(job: dict) -> dict:
     res = job.get("result")
     if res:
         out["result"] = {k: res.get(k) for k in ("provider", "model", "input", "crosscheck", "facts", "curve", "report",
-                                                 "report_source", "analysis_trace")}
+                                                 "report_source", "analysis_trace", "agent_trace")}
         if job.get("pro_report"):
             out["result"]["pro_report"] = job["pro_report"]
     return out
@@ -93,9 +99,15 @@ def _run_pro(job_id: str):
             job["pro_status"] = "error: " + str(e)[:200]
 
 
+class Busy(Exception):
+    pass
+
+
 def create_job(csv_text: str, trials: int, risk: float | None) -> str:
     job_id = uuid.uuid4().hex
     with LOCK:
+        if sum(1 for j in JOBS.values() if j.get("status") == "running") >= MAX_RUNNING_JOBS:
+            raise Busy()
         if len(JOBS) >= MAX_JOBS:
             oldest = sorted(JOBS.values(), key=lambda j: j["created"])[: len(JOBS) - MAX_JOBS + 1]
             for j in oldest:
@@ -162,6 +174,7 @@ class Handler(BaseHTTPRequestHandler):
                                    "form-action 'self' https://www.sandbox.paypal.com; frame-ancestors 'none'"})
         if path == "/api/config":
             return self._json({"llm": provider_info(), "payments": PAYMENTS.status(),
+                               "sandbox": runner_client.get_runner().label, "agent": agent_loop.limits_from_env(),
                                "samples": sorted(f for f in os.listdir(SAMPLES) if f.endswith(".csv"))})
         m = re.match(r"^/api/samples/([A-Za-z0-9_.-]+\.csv)$", path)
         if m:
@@ -189,7 +202,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/paypal/return":
             return self._paypal_return(q)
         if path == "/healthz":
-            return self._json({"ok": True})
+            runner = runner_client.get_runner()
+            ok = runner.health()
+            return self._json({"ok": ok, "sandbox": runner.label}, 200 if ok else 503)
         return self._err("not found", 404)
 
     def do_POST(self):
@@ -211,7 +226,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err("trials must be between 1 and 100000")
             if risk is not None and risk <= 0:
                 return self._err("risk_usd must be positive")
-            return self._json({"id": create_job(csv_text, trials, risk)}, 202)
+            try:
+                return self._json({"id": create_job(csv_text, trials, risk)}, 202)
+            except Busy:
+                return self._err("The auditor is busy. Please try again in a minute.", 429)
         m = re.match(r"^/api/audit/([a-f0-9]{32})/chat$", path)
         if m:
             job = self._job(m.group(1))

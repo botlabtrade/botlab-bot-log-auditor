@@ -6,7 +6,9 @@ Providers
                          Env: LLM_BASE_URL (e.g. https://api.vultrinference.com/v1), LLM_API_KEY, LLM_MODEL
   * mock               - deterministic templates, no network. Default when no key is set.
 
-Select with LLM_PROVIDER=anthropic|openai_compatible|mock (auto-detected if unset).
+  * vultr              - alias of openai_compatible with LLM_BASE_URL defaulting to https://api.vultrinference.com/v1
+
+Select with LLM_PROVIDER=anthropic|openai_compatible|vultr|mock (auto-detected if unset).
 Keys are read from environment variables only and are never logged or returned to the UI.
 
 MIT License (c) 2026 BOTLAB
@@ -20,6 +22,7 @@ import urllib.error
 import urllib.request
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+VULTR_BASE_URL = "https://api.vultrinference.com/v1"  # Vultr Serverless Inference (OpenAI-compatible)
 ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-5-5"
 
 SYSTEM_PROMPT = """You are BOTLAB Auditor, a careful statistician who audits trading-bot trade logs.
@@ -95,6 +98,8 @@ class BaseLLM:
     # ---- agent skills ----
     def write_report(self, facts: dict, pro: bool = False) -> str:
         sections = REPORT_SECTIONS_PRO if pro else REPORT_SECTIONS_BASIC
+        if (facts.get("agent") or {}).get("steps"):
+            sections += "\n## Agent follow-up analyses"
         prompt = (f"FACTS (JSON):\n{_facts_json(facts)}\n\nWrite the {'PRO (detailed)' if pro else 'standard'} audit report "
                   f"with exactly these sections:\n{sections}\n"
                   f"{'Aim for 700-1000 words.' if pro else 'Aim for 250-400 words.'}")
@@ -119,6 +124,61 @@ class BaseLLM:
     def write_analysis_code(self) -> str:
         return _extract_code(self.complete("You write small, safe, standard-library Python scripts.",
                                            [{"role": "user", "content": ANALYSIS_CODE_PROMPT}], 1200))
+
+    # ---- agentic loop (tool-call style JSON protocol, see agent_loop.py) ----
+    def next_agent_action(self, messages: list[dict], step: int, max_steps: int) -> dict:
+        """Return {"tool": "run_python", "why", "code"} or {"tool": "finish", "summary"}.
+
+        `messages` is the running conversation built by agent_loop (user/assistant turns)."""
+        text = self.complete(AGENT_SYSTEM_PROMPT.format(max_steps=max_steps), messages, max_tokens=1500)
+        return parse_agent_action(text)
+
+
+AGENT_SYSTEM_PROMPT = """You are the BOTLAB audit agent. Six statistical gates have already been computed (FACTS).
+You may now run up to {max_steps} short follow-up analyses on the trade log to check the weakest points
+(e.g. edge decay over time, dependence on the best coin or days, drawdown under reshuffled trade order,
+losing side, streaks). Each analysis is Python code executed in an isolated sandbox.
+
+Reply with EXACTLY ONE JSON object and nothing else, one of:
+{{"tool": "run_python", "why": "<one sentence: what you check and why>", "code": "<python script>"}}
+{{"tool": "finish", "summary": "<3-6 short bullet lines of plain-English findings>"}}
+
+Sandbox rules for code: Python 3 standard library only (json, math, statistics, collections, random,
+itertools, datetime). No network, no subprocess, no files except ./trades.json (a list of objects with keys
+v (float result), sym (str), day ('YYYY-MM-DD' or ''), side ('L', 'S' or '')). Print ONE small JSON object
+to stdout (under 4000 characters). Time limit a few seconds per run. Use a fixed random seed.
+In the summary use only numbers that appear in FACTS or in tool results. Educational audit only:
+never advise buying, selling or sizing, never predict profits."""
+
+
+def _first_json_object(text: str):
+    dec = json.JSONDecoder()
+    for i, ch in enumerate(text or ""):
+        if ch == "{":
+            try:
+                obj, _ = dec.raw_decode(text[i:])
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                return obj
+    return None
+
+
+def parse_agent_action(text: str) -> dict:
+    """Parse a model reply into an agent action. Never raises; unknown replies become {"tool": "invalid"}."""
+    obj = _first_json_object(text)
+    if isinstance(obj, dict):
+        tool = str(obj.get("tool") or obj.get("action") or obj.get("name") or "").strip().lower()
+        args = obj.get("arguments") if isinstance(obj.get("arguments"), dict) else obj
+        if tool == "run_python" and isinstance(args.get("code"), str) and args["code"].strip():
+            return {"tool": "run_python", "why": str(args.get("why") or "")[:300], "code": args["code"]}
+        if tool == "finish":
+            return {"tool": "finish", "summary": str(args.get("summary") or "")[:3000]}
+    if text and "```" in text:  # tolerate a bare fenced code block
+        code = _extract_code(text)
+        if code:
+            return {"tool": "run_python", "why": "(model replied with a code block)", "code": code}
+    return {"tool": "invalid", "raw": (text or "")[:500]}
 
 
 def ensure_disclaimer(text: str) -> str:
@@ -149,6 +209,10 @@ class OpenAICompatibleLLM(BaseLLM):
         self.base_url = base_url.rstrip("/")
         self._key = api_key
         self.model = model
+
+    @property
+    def endpoint_label(self) -> str:
+        return "Vultr Serverless Inference" if "vultrinference.com" in self.base_url else "OpenAI-compatible endpoint"
 
     def complete(self, system, messages, max_tokens=1500):
         out = self.transport(self.base_url + "/chat/completions", {"Authorization": f"Bearer {self._key}"},
@@ -208,6 +272,14 @@ class MockLLM(BaseLLM):
     def write_analysis_code(self) -> str:
         return MOCK_ANALYSIS_CODE.strip()
 
+    def next_agent_action(self, messages, step, max_steps):
+        """Deterministic plan: the follow-ups in MOCK_AGENT_PLAN, then finish with a summary built from
+        the tool results the loop fed back (so the summary only cites computed numbers)."""
+        if step <= min(max_steps, len(MOCK_AGENT_PLAN)):
+            why, code = MOCK_AGENT_PLAN[step - 1]
+            return {"tool": "run_python", "why": why, "code": code.strip()}
+        return {"tool": "finish", "summary": _mock_agent_summary(messages)}
+
     def write_report(self, facts, pro=False):
         g = facts["gates"]
         unit = facts["metrics"]["unit"]
@@ -231,6 +303,12 @@ class MockLLM(BaseLLM):
         nexts.append("Re-run the strategy on a period it was never tuned on (out-of-sample) and compare.")
         nexts.append("Check the bot's code for look-ahead bias and realistic fees, slippage and funding; this audit cannot see code.")
         L += [f"- {s}" for s in nexts]
+        ag = facts.get("agent") or {}
+        if ag.get("steps"):
+            ok = sum(1 for st in ag["steps"] if st.get("ok"))
+            L += ["", "## Agent follow-up analyses", "",
+                  f"The agent ran {len(ag['steps'])} follow-up analyses in the sandbox ({ok} succeeded).", ""]
+            L += [ag.get("summary") or "- No summary."]
         L += ["", "## Risk warnings", ""]
         warns = list(facts.get("flags") or [])
         if unit != "R":
@@ -286,6 +364,78 @@ class MockLLM(BaseLLM):
             return ensure_disclaimer("Next: collect more trades, test out-of-sample, and audit the code for look-ahead bias and costs.")
         return ensure_disclaimer("(Mock mode) I can explain any gate: ask e.g. 'why did G1 fail?' or 'what is DSR?'. "
                                  "Set ANTHROPIC_API_KEY or LLM_BASE_URL/LLM_API_KEY for free-form answers.")
+
+
+MOCK_AGENT_PLAN = [
+    ("Check whether the edge decays over time: expectancy per consecutive block of trades.", r'''
+import json
+t = [x["v"] for x in json.load(open("trades.json"))]
+k = max(10, len(t) // 5)
+blocks = [t[i:i + k] for i in range(0, len(t), k)]
+means = [round(sum(b) / len(b), 4) for b in blocks if b]
+print(json.dumps({"check": "edge_decay", "block_size": k, "block_means": means,
+                  "first_half_mean": round(sum(t[:len(t)//2]) / max(1, len(t)//2), 4),
+                  "second_half_mean": round(sum(t[len(t)//2:]) / max(1, len(t) - len(t)//2), 4)}))
+'''),
+    ("Check dependence on the single best coin and the two best days: total with them removed.", r'''
+import json, collections
+tr = json.load(open("trades.json"))
+tot = sum(x["v"] for x in tr)
+by_sym = collections.Counter(); by_day = collections.Counter()
+for x in tr:
+    by_sym[x.get("sym") or "?"] += x["v"]
+    if x.get("day"):
+        by_day[x["day"]] += x["v"]
+best_sym = max(by_sym, key=by_sym.get) if by_sym else None
+best_days = [d for d, _ in by_day.most_common(2)]
+print(json.dumps({"check": "concentration", "total": round(tot, 4), "best_coin": best_sym,
+                  "total_without_best_coin": round(tot - by_sym.get(best_sym, 0.0), 4),
+                  "best_days": best_days,
+                  "total_without_best_2_days": round(tot - sum(by_day[d] for d in best_days), 4)}))
+'''),
+    ("Stress the drawdown: reshuffle the trade order 500 times (seed 7) and read the 95th percentile.", r'''
+import json, random
+t = [x["v"] for x in json.load(open("trades.json"))]
+def mdd(xs):
+    peak = cur = dd = 0.0
+    for v in xs:
+        cur += v; peak = max(peak, cur); dd = max(dd, peak - cur)
+    return dd
+rng = random.Random(7)
+sims = []
+for _ in range(500):
+    s = t[:]; rng.shuffle(s); sims.append(mdd(s))
+sims.sort()
+print(json.dumps({"check": "drawdown_reshuffle", "runs": 500, "actual_max_dd": round(mdd(t), 4),
+                  "median_max_dd": round(sims[len(sims)//2], 4), "p95_max_dd": round(sims[int(0.95 * len(sims)) - 1], 4)}))
+'''),
+]
+
+
+def _mock_agent_summary(messages) -> str:
+    res = {}
+    for m in messages:
+        if m.get("role") == "user" and str(m.get("content", "")).startswith("TOOL RESULT"):
+            obj = _first_json_object(m["content"].split("stdout:", 1)[-1])
+            if isinstance(obj, dict) and obj.get("check"):
+                res[obj["check"]] = obj
+    L = []
+    d = res.get("edge_decay")
+    if d:
+        trend = "lower" if d["second_half_mean"] < d["first_half_mean"] else "not lower"
+        L.append(f"- Edge over time: the second half averages {d['second_half_mean']:+.3f} per trade vs "
+                 f"{d['first_half_mean']:+.3f} in the first half ({trend}).")
+    c = res.get("concentration")
+    if c:
+        L.append(f"- Concentration: total {c['total']:+.2f}; without the best coin ({c['best_coin']}) "
+                 f"{c['total_without_best_coin']:+.2f}; without the two best days {c['total_without_best_2_days']:+.2f}.")
+    s = res.get("drawdown_reshuffle")
+    if s:
+        L.append(f"- Drawdown stress: actual max drawdown {s['actual_max_dd']:.2f}; across {s['runs']} reshuffled "
+                 f"orders the median is {s['median_max_dd']:.2f} and the 95th percentile {s['p95_max_dd']:.2f}.")
+    if not L:
+        L.append("- No follow-up analysis produced a usable result.")
+    return "\n".join(L)
 
 
 GATE_EXPLAIN = {
@@ -346,6 +496,12 @@ def get_llm(provider: str | None = None) -> BaseLLM:
         if not key:
             raise LLMError("LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set")
         return AnthropicLLM(key, os.environ.get("LLM_MODEL") or ANTHROPIC_DEFAULT_MODEL)
+    if provider == "vultr":  # convenience alias: OpenAI-compatible client pointed at Vultr Serverless Inference
+        key = os.environ.get("LLM_API_KEY") or os.environ.get("VULTR_INFERENCE_API_KEY")
+        model = os.environ.get("LLM_MODEL")
+        if not (key and model):
+            raise LLMError("LLM_PROVIDER=vultr needs LLM_API_KEY (Vultr inference key) and LLM_MODEL")
+        return OpenAICompatibleLLM(os.environ.get("LLM_BASE_URL") or VULTR_BASE_URL, key, model)
     if provider == "openai_compatible":
         base, key, model = os.environ.get("LLM_BASE_URL"), os.environ.get("LLM_API_KEY"), os.environ.get("LLM_MODEL")
         if not (base and key and model):

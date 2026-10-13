@@ -1,0 +1,7 @@
+# Files used inside Linux containers / on the server must keep LF endings
+*.sh text eol=lf
+*.py text eol=lf
+vultr/Caddyfile text eol=lf
+vultr/Dockerfile.* text eol=lf
+vultr/*.yml text eol=lf
+vultr/.env.example text eol=lf

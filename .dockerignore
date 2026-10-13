@@ -1,0 +1,14 @@
+# keep images small and secrets out of the build context
+.git
+.env
+.env.*
+!.env.example
+vultr/.env
+**/__pycache__
+.pytest_cache
+worker
+video
+docs
+tests
+*.md
+!README.md
