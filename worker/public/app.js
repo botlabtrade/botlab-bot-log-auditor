@@ -22,7 +22,7 @@ fetch('/api/config').then(r => r.json()).then(c => {
   cfg = c;
   $('#llmPill span').textContent = 'AI: Workers AI · ' + c.ai.model.split('/').pop();
   $('#payPill span').textContent = c.payments.label;
-  if (c.payments.mode !== 'server') $('#payPill').classList.add('off');
+  if (c.payments.mode !== 'server' && c.payments.mode !== 'braintree') $('#payPill').classList.add('off');
   c.samples.forEach(name => {
     const b = document.createElement('button');
     b.type = 'button';
@@ -127,6 +127,14 @@ function resetPro() {
   $('#proBody').classList.add('hidden'); $('#printBtn').classList.add('hidden'); $('#reportCard').classList.remove('hidden');
   $('#payNote').classList.add('hidden'); $('#paypalButtons').innerHTML = '';
   const pay = cfg ? cfg.payments : { mode: 'mock', price: '4.99' };
+  if (pay.mode === 'braintree') {
+    $('#demoBtn').classList.add('hidden');
+    note(`Braintree Sandbox (a PayPal service) · $${pay.price} test money · pay with the sandbox test card 4111 1111 1111 1111 (any future date, any CVV). Charged and verified on the server.`);
+    window.BotlabBT.mount({ container: '#paypalButtons', fingerprint: last.fingerprint, nonce: NONCE, onNote: note,
+      onPaid: async t => { note('Payment captured (Braintree sandbox transaction ' + t.id + '). Writing the Pro audit…'); await runPro({ bt_transaction: t.id }, t.id); } })
+      .catch(e => note('Could not load the Braintree checkout: ' + e.message));
+    return;
+  }
   if (pay.mode === 'server' || pay.mode === 'sb') {
     $('#demoBtn').classList.add('hidden');
     note(pay.mode === 'server'
@@ -199,7 +207,7 @@ async function runPro(extra, orderId) {
   try {
     const res = await streamAudit('/api/pro', Object.assign({}, lastInput, extra), onStep);
     last = res; render(res);
-    note(extra.demo ? 'Pro audit unlocked (demo mode, no payment taken).' : 'Pro audit unlocked (paid with sandbox test money, PayPal order ' + orderId + ').');
+    note(extra.demo ? 'Pro audit unlocked (demo mode, no payment taken).' : extra.bt_transaction ? 'Pro audit unlocked (paid with sandbox test money, Braintree transaction ' + orderId + ').' : 'Pro audit unlocked (paid with sandbox test money, PayPal order ' + orderId + ').');
   } catch (e) { note(e.message); }
 }
 

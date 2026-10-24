@@ -16,6 +16,8 @@ export function paypalConfigured(env) {
 
 /**
  * Payment mode:
+ *   'braintree' - BRAINTREE_MERCHANT_ID/PUBLIC_KEY/PRIVATE_KEY secrets exist: Braintree (a PayPal service) sandbox,
+ *              Drop-in UI (PayPal wallet or card) + server-side charge and verification (src/braintree.js).
  *   'server' - PAYPAL_CLIENT_ID + PAYPAL_CLIENT_SECRET secrets exist: Orders v2 create/capture/verify on the server.
  *   'sb'     - no secrets, PAYPAL_MODE=sb (default): PayPal JS SDK with the generic sandbox client id `sb`;
  *              the order is created and captured in the browser, the Worker checks the returned order shape.
@@ -23,6 +25,7 @@ export function paypalConfigured(env) {
  *   'mock'   - no secrets, PAYPAL_MODE=mock: a "mock unlock" button, no PayPal at all.
  */
 export function paymentMode(env) {
+  if (env && env.BRAINTREE_MERCHANT_ID && env.BRAINTREE_PUBLIC_KEY && env.BRAINTREE_PRIVATE_KEY) return 'braintree';
   if (paypalConfigured(env)) return 'server';
   return String((env && env.PAYPAL_MODE) || 'sb').toLowerCase() === 'mock' ? 'mock' : 'sb';
 }

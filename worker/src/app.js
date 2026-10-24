@@ -11,6 +11,7 @@ import { normalize, sniffRows, heuristicMapping } from './normalize.js';
 import { analyse, crossCheck } from './analysis.js';
 import { buildFacts, writeReport, chat, AI_MODEL } from './report.js';
 import { paypalConfigured, paymentMode, price, createOrder, captureOrder, verifyOrder, verifySbOrder, getOrder, verifyWebhook, receiptFrom } from './paypal.js';
+import { braintreeConfigured, clientToken, charge, getTransaction, findPaid, checkTxn, receiptFromTxn, parseWebhook } from './braintree.js';
 
 export const MAX_CSV_BYTES = 2 * 1024 * 1024;
 export const MAX_BODY_BYTES = MAX_CSV_BYTES + 64 * 1024;
@@ -31,11 +32,11 @@ export const STEPS = [
 const cspFor = nonce => CSP.replace("script-src 'self'", `script-src 'self' 'nonce-${nonce}'`);
 const CSP = [
   "default-src 'self'",
-  "script-src 'self' https://www.paypal.com https://www.sandbox.paypal.com https://*.paypalobjects.com",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: https://*.paypal.com https://*.paypalobjects.com",
-  "connect-src 'self' https://*.paypal.com https://*.paypalobjects.com",
-  "frame-src https://www.paypal.com https://www.sandbox.paypal.com https://*.paypal.com",
+  "script-src 'self' https://www.paypal.com https://www.sandbox.paypal.com https://*.paypalobjects.com https://js.braintreegateway.com https://assets.braintreegateway.com",
+  "style-src 'self' 'unsafe-inline' https://assets.braintreegateway.com",
+  "img-src 'self' data: https://*.paypal.com https://*.paypalobjects.com https://assets.braintreegateway.com https://*.braintree-api.com",
+  "connect-src 'self' https://*.paypal.com https://*.paypalobjects.com https://*.braintree-api.com https://*.braintreegateway.com",
+  "frame-src https://www.paypal.com https://www.sandbox.paypal.com https://*.paypal.com https://assets.braintreegateway.com https://*.braintreegateway.com",
   "font-src 'self' data:",
   "object-src 'none'",
   "base-uri 'none'",
@@ -214,7 +215,7 @@ export function agentManifest(origin, env) {
   return {
     name: 'BOTLAB Bot Log Auditor',
     description: 'Statistical audit of a trading bot trade log: six gates (sample size, Deflated Sharpe, recency, concentration, losing side, drawdown) plus an AI-written report. Educational, not financial advice.',
-    payment: { provider: 'PayPal', environment: 'sandbox', currency: 'USD', price: price(env), mode: paymentMode(env),
+    payment: { provider: paymentMode(env) === 'braintree' ? 'Braintree (PayPal)' : 'PayPal', environment: 'sandbox', currency: 'USD', price: price(env), mode: paymentMode(env),
       human_approval: 'Each purchase is approved by a human on PayPal (approve_url) before the agent can collect the audit.' },
     flow: [
       { step: 'quote', method: 'POST', url: origin + '/api/agent/quote', body: '{csv, trials?, risk_usd?, agent?, max_price_usd}', returns: 'free gate summary + offer + PayPal order (order_id, approve_url)' },
@@ -237,7 +238,12 @@ async function agentQuote(request, env, body) {
   const origin = new URL(request.url).origin;
   const mode = paymentMode(env);
   let payment;
-  if (mode === 'server') {
+  if (mode === 'braintree') {
+    // The human approves by paying on our own checkout page (Braintree Drop-in: PayPal wallet or card).
+    const agent = String(body.agent || '').replace(/[^A-Za-z0-9 ._-]/g, '').slice(0, 40);
+    payment = { mode, order_id: q.fingerprint, status: 'AWAITING_APPROVAL',
+      approve_url: origin + '/pay.html?fp=' + q.fingerprint + (agent ? '&agent=' + encodeURIComponent(agent) : '') };
+  } else if (mode === 'server') {
     const o = await createOrder(env, q.fingerprint, undefined, { agent: body.agent,
       returnUrl: origin + '/paid.html', cancelUrl: origin + '/paid.html?cancelled=1' });
     payment = { mode, order_id: o.id, status: o.status, approve_url: o.approve_url };
@@ -263,7 +269,14 @@ async function agentFulfil(env, body) {
   const orderId = String(body.order_id || '');
   const mode = paymentMode(env);
   let receipt;
-  if (mode === 'server') {
+  if (mode === 'braintree') {
+    const t = await findPaid(env, fp);
+    if (!t) return json({ status: 'awaiting_approval', order_id: fp, approve_url: null }, 202);
+    const v = checkTxn(t, fp, env);
+    if (!v.ok) return err('Pro not unlocked: ' + v.reason, 402);
+    receipt = receiptFromTxn(t, 'agent');
+    await saveReceipt(env, receipt);
+  } else if (mode === 'server') {
     let o = await getOrder(env, orderId);
     if (o.custom_id && o.custom_id !== fp) return err('Order was paid for a different file.', 402);
     if (o.status === 'CREATED' || o.status === 'PAYER_ACTION_REQUIRED' || o.status === 'SAVED') {
@@ -295,7 +308,7 @@ export default {
         if (path === '/api/config' && request.method === 'GET') {
           const mode = paymentMode(env);
           const payments = { mode, price: price(env), currency: 'USD',
-            label: { server: 'PayPal Sandbox', sb: 'Payments demo mode · PayPal sandbox (sb)', mock: 'Payments demo mode' }[mode],
+            label: { braintree: 'Braintree Sandbox (PayPal)', server: 'PayPal Sandbox', sb: 'Payments demo mode · PayPal sandbox (sb)', mock: 'Payments demo mode' }[mode],
             client_id: mode === 'server' ? env.PAYPAL_CLIENT_ID : mode === 'sb' ? 'sb' : null };
           return json({
             ai: { model: AI_MODEL, binding: Boolean(env.AI) },
@@ -310,6 +323,11 @@ export default {
           const id = url.searchParams.get('order_id') || '';
           if (!/^[A-Za-z0-9-_]{6,40}$/.test(id)) return err('bad order id');
           let r = await loadReceipt(env, id);
+          if (!r && paymentMode(env) === 'braintree') {
+            const t = await getTransaction(env, id);
+            if (!t || !checkTxn(t, t.order_id, env).ok) return err('No completed payment for this transaction.', 404);
+            r = receiptFromTxn(t, 'braintree-lookup');
+          }
           if (!r && paymentMode(env) === 'server') {
             const o = await getOrder(env, id);
             if (o.status !== 'COMPLETED') return err('No completed payment for this order (status ' + o.status + ').', 404);
@@ -318,6 +336,20 @@ export default {
           return r ? json(r) : err('No receipt for this order.', 404);
         }
         if (request.method !== 'POST') return err('Method not allowed.', 405);
+        if (path === '/api/braintree/webhook') {
+          if (rateLimited(ip, 'webhook')) return err('Too many webhook calls.', 429);
+          if (!braintreeConfigured(env)) return err('Braintree is off on this deployment.', 503);
+          const form = await request.formData().catch(() => null);
+          const n = form && await parseWebhook(env, form.get('bt_signature'), form.get('bt_payload'));
+          if (!n) return err('Webhook signature not verified.', 401);
+          if (n.transaction_id && /^transaction_(settled|settlement_pending|disbursed)$|^check$/.test(n.kind || '')) {
+            try {
+              const t = await getTransaction(env, n.transaction_id);
+              if (t) await saveReceipt(env, receiptFromTxn(t, 'webhook:' + n.kind));
+            } catch { /* receipt is best effort */ }
+          }
+          return json({ received: true, kind: n.kind });
+        }
         const ct = request.headers.get('content-type') || '';
         if (!ct.includes('application/json')) return err('Content-Type must be application/json.', 415);
 
@@ -330,7 +362,8 @@ export default {
             const fp = await fingerprint(input);
             const mode = paymentMode(env);
             let v;
-            if (mode === 'server') v = await verifyOrder(env, String(body.order_id || ''), fp).catch(e => ({ ok: false, reason: e.message }));
+            if (mode === 'braintree') v = await getTransaction(env, String(body.bt_transaction || '')).then(t => checkTxn(t, fp, env)).catch(e => ({ ok: false, reason: e.message }));
+            else if (mode === 'server') v = await verifyOrder(env, String(body.order_id || ''), fp).catch(e => ({ ok: false, reason: e.message }));
             else if (mode === 'sb') v = verifySbOrder(body.sb_order, fp, env);
             else v = body.demo === true ? { ok: true } : { ok: false, reason: 'send demo=true for the mock unlock' };
             if (!v.ok) return err('Pro not unlocked: ' + v.reason, 402);
@@ -372,6 +405,17 @@ export default {
           return path === '/api/agent/quote' ? await agentQuote(request, env, body) : await agentFulfil(env, body);
         }
 
+        if (path === '/api/bt/token' || path === '/api/bt/checkout') {
+          if (rateLimited(ip, 'paypal')) return err('Too many payment requests.', 429);
+          if (!braintreeConfigured(env)) return err('Braintree is off on this deployment.', 503);
+          const body = await readJson(request);
+          if (path === '/api/bt/token') return json({ client_token: await clientToken(env), price: price(env), currency: 'USD',
+            paypal: String(env.BRAINTREE_PAYPAL || '').toLowerCase() === 'on' });
+          const t = await charge(env, String(body.nonce || ''), String(body.fingerprint || ''));
+          if (t.completed) await saveReceipt(env, receiptFromTxn(t, body.agent ? 'agent-approval' : 'checkout'));
+          return json({ id: t.id, status: t.status, completed: t.completed, method: t.method });
+        }
+
         if (path === '/api/paypal/create' || path === '/api/paypal/capture') {
           if (rateLimited(ip, 'paypal')) return err('Too many payment requests.', 429);
           if (!paypalConfigured(env)) return err('Server-side PayPal is off (no sandbox keys configured).', 503);
@@ -399,7 +443,7 @@ export default {
     } catch (e) {
       if (e instanceof HttpError) return err(e.message, e.status);
       if (/^(Need|Empty|Could not)/.test(String(e.message))) return err(e.message, 422);
-      if (/^PayPal|bad (order id|fingerprint)/.test(String(e.message))) return err(String(e.message).slice(0, 200), 502);
+      if (/^(PayPal|Braintree)|bad (order id|fingerprint|transaction id|payment nonce)/.test(String(e.message))) return err(String(e.message).slice(0, 200), 502);
       return err('Internal error.', 500);
     }
   },

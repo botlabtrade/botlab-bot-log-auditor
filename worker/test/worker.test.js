@@ -285,3 +285,67 @@ test('webhook: refused without PAYPAL_WEBHOOK_ID or a verified signature; stores
     assert.equal(JSON.parse(kv.m.get('order:ORD9')).source, 'webhook');
   } finally { globalThis.fetch = realFetch; }
 });
+
+/* ---------------------------------------------------------------- Braintree (PayPal service) sandbox */
+import * as bt from '../src/braintree.js';
+
+test('Braintree mode: Drop-in token, server charge bound to the file, Pro unlock, agent flow, webhook', async () => {
+  const kv = memKV();
+  const env = { BRAINTREE_MERCHANT_ID: 'm', BRAINTREE_PUBLIC_KEY: 'pub', BRAINTREE_PRIVATE_KEY: 'priv', RECEIPTS: kv };
+  const csv = sample('synthetic_42_trades_small_lucky.csv');
+  const txns = new Map();
+  const seen = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    seen.push(String(url));
+    assert.equal(init.headers['Braintree-Version'], '2019-01-01');
+    const { query, variables } = JSON.parse(init.body);
+    if (query.includes('createClientToken')) return Response.json({ data: { createClientToken: { clientToken: 'CT' } } });
+    if (query.includes('chargePaymentMethod')) {
+      const t = { id: 'dHJhbnNhY3Rpb25f' + (txns.size + 1), status: 'SUBMITTED_FOR_SETTLEMENT', orderId: variables.input.transaction.orderId,
+        amount: { value: variables.input.transaction.amount, currencyCode: 'USD' }, paymentMethodSnapshot: { __typename: 'PayPalTransactionDetails' } };
+      txns.set(t.id, t);
+      return Response.json({ data: { chargePaymentMethod: { transaction: t } } });
+    }
+    if (query.includes('node(id')) return Response.json({ data: { node: txns.get(variables.id) || null } });
+    if (query.includes('search')) return Response.json({ data: { search: { transactions: { edges: [...txns.values()].filter(t => t.orderId === variables.o).map(node => ({ node })) } } } });
+    return Response.json({ errors: [{ message: 'unknown' }] });
+  };
+  try {
+    const cfg = await (await worker.fetch(new Request('https://x.test/api/config'), env, ctx)).json();
+    assert.equal(cfg.payments.mode, 'braintree');
+    assert.ok(!JSON.stringify(cfg).includes('priv'), 'private key never sent to the browser');
+    assert.equal((await (await worker.fetch(post('/api/bt/token', {}), env, ctx)).json()).client_token, 'CT');
+    const fp = (await (await worker.fetch(post('/api/audit', { csv }), {}, ctx)).json()).fingerprint;
+    // agent quote -> awaiting approval (no transaction yet)
+    const q = await (await worker.fetch(post('/api/agent/quote', { csv, agent: 'fastbot-5m' }), env, ctx)).json();
+    assert.match(q.payment.approve_url, /\/pay\.html\?fp=[a-f0-9]{64}&agent=fastbot-5m$/);
+    assert.equal((await worker.fetch(post('/api/agent/fulfil', { csv }), env, ctx)).status, 202);
+    // human pays on /pay.html (Drop-in nonce -> server charge)
+    const c = await (await worker.fetch(post('/api/bt/checkout', { nonce: 'fake-paypal-nonce-1', fingerprint: fp, agent: 'fastbot-5m' }), env, ctx)).json();
+    assert.equal(c.completed, true);
+    const f = await (await worker.fetch(post('/api/agent/fulfil', { csv }), env, ctx)).json();
+    assert.equal(f.status, 'fulfilled');
+    assert.equal(f.receipt.provider, 'braintree');
+    assert.equal(f.audit.pro, true);
+    // browser Pro unlock with a transaction id; wrong file is refused
+    const pr = await worker.fetch(post("/api/pro", { csv, bt_transaction: c.id }), env, ctx);
+    assert.equal(pr.status, 200, JSON.stringify(await pr.clone().json().catch(() => ({}))));
+    const other = await worker.fetch(post('/api/pro', { csv: sample('synthetic_640_trades_passes.csv'), bt_transaction: c.id }), env, ctx);
+    assert.equal(other.status, 402);
+    assert.match((await other.json()).error, /different file/);
+    assert.equal((await worker.fetch(post('/api/pro', { csv, demo: true }), env, ctx)).status, 402);
+    // receipt
+    assert.equal((await (await worker.fetch(new Request('https://x.test/api/receipt?order_id=' + c.id), env, ctx)).json()).amount, '4.99 USD');
+    // webhook: bad signature refused, good signature accepted
+    const xml = `<notification><kind>transaction_settled</kind><subject><transaction><id>${c.id}</id><status>settled</status><order-id>${fp}</order-id><amount>4.99</amount></transaction></subject></notification>`;
+    const payload = btoa(xml);
+    const form = sig => new Request('https://x.test/api/braintree/webhook', { method: 'POST', headers: { 'cf-connecting-ip': '1.2.3.4' },
+      body: new URLSearchParams({ bt_signature: sig, bt_payload: payload }) });
+    assert.equal((await worker.fetch(form('pub|deadbeef'), env, ctx)).status, 401);
+    const good = await worker.fetch(form('pub|' + await bt.signPayload('priv', payload)), env, ctx);
+    assert.equal(good.status, 200);
+    assert.equal((await good.json()).kind, 'transaction_settled');
+    assert.ok(seen.every(u => u === 'https://payments.sandbox.braintree-api.com/graphql'), 'sandbox host only');
+  } finally { globalThis.fetch = realFetch; }
+});

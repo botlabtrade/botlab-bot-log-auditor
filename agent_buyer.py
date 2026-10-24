@@ -59,7 +59,7 @@ def main(argv=None):
     print(f"[agent] free check: {fq['passed']}/{fq['total']} gates passed, verdict {fq['verdict']}")
     print(f"[agent] offer: {q['offer']['product']} for {q['offer']['price']} {q['offer']['currency']} (budget {a.max_price})")
     pay = q["payment"]
-    print(f"[agent] PayPal order {pay['order_id']} created. Waiting for my owner to approve the spend:\n        {pay['approve_url']}")
+    print(f"[agent] payment order {pay['order_id'][:16]}... created. Waiting for my owner to approve the spend:\n        {pay['approve_url']}")
 
     deadline = time.time() + a.wait
     while True:

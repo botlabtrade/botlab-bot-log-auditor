@@ -21,8 +21,14 @@ binding = "AI"
 PRO_PRICE_USD = "4.99"
 # Payment mode when the PayPal secrets below are NOT set: "sb" (PayPal JS SDK, generic sandbox client id, no account needed) or "mock".
 PAYPAL_MODE = "sb"
+# Braintree Drop-in shows the PayPal wallet only when "on" (the merchant must link a PayPal sandbox account first).
+BRAINTREE_PAYPAL = "off"
 
-# Secrets - set by the owner with `npx wrangler secret put <NAME>`, never written in this file:
+# Secrets - set by the owner with `npx wrangler secret put <NAME>`, never written in this file.
+# Option A (used by the hosted demo): Braintree, a PayPal service. Sandbox control panel -> Settings -> API:
+#   BRAINTREE_MERCHANT_ID  BRAINTREE_PUBLIC_KEY  BRAINTREE_PRIVATE_KEY
+#   Webhook (Settings -> Webhooks): https://<worker>/api/braintree/webhook, kind "Transaction Settled".
+# Option B: PayPal REST app (developer.paypal.com, sandbox):
 #   PAYPAL_CLIENT_ID       PayPal Developer *sandbox* REST app client id
 #   PAYPAL_CLIENT_SECRET   PayPal Developer *sandbox* REST app secret
 # Without them the UI shows "Payments demo mode" and uses PAYPAL_MODE (sb buttons or mock unlock).
