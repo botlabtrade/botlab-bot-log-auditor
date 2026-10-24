@@ -64,8 +64,9 @@ edge is not proven, recommends pausing the book. On a deployment without PayPal 
 `PAYPAL_MODE=mock`, the order is simulated so the flow can be tried offline.
 
 **For judges (sandbox only, test money):** on the hosted demo, pay with the Braintree test card
-**4111 1111 1111 1111** (any future expiry, any CVV), or choose PayPal in the Drop-in and use the sandbox
-wallet it opens. No real account or money is needed. With Braintree keys set, the agent's `approve_url`
+**4111 1111 1111 1111** (any future expiry, any CVV), or use the **PayPal Checkout** buttons below it
+(PayPal JS SDK, sandbox): "Debit or Credit Card" opens PayPal's own guest checkout, where the same test card
+works. No real account or money is needed. With Braintree keys set, the agent's `approve_url`
 is our own `/pay.html` checkout, and `/api/agent/fulfil` finds the paid transaction by the file
 fingerprint.
 

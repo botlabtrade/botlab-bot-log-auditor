@@ -349,3 +349,14 @@ test('Braintree mode: Drop-in token, server charge bound to the file, Pro unlock
     assert.ok(seen.every(u => u === 'https://payments.sandbox.braintree-api.com/graphql'), 'sandbox host only');
   } finally { globalThis.fetch = realFetch; }
 });
+
+test('Braintree mode also accepts a PayPal Checkout (sb) order, unless PAYPAL_SB_BUTTONS=off', async () => {
+  const env = { BRAINTREE_MERCHANT_ID: 'm', BRAINTREE_PUBLIC_KEY: 'pub', BRAINTREE_PRIVATE_KEY: 'priv' };
+  const csv = sample('synthetic_42_trades_small_lucky.csv');
+  const cfg = await (await worker.fetch(new Request('https://x.test/api/config'), env, ctx)).json();
+  assert.equal(cfg.payments.paypal_checkout, true);
+  const fp = (await (await worker.fetch(post('/api/audit', { csv }), {}, ctx)).json()).fingerprint;
+  const order = { id: 'SBORDER123', status: 'COMPLETED', purchase_units: [{ custom_id: fp, payments: { captures: [{ id: 'C1', status: 'COMPLETED', amount: { currency_code: 'USD', value: '4.99' } }] } }] };
+  assert.equal((await worker.fetch(post('/api/pro', { csv, sb_order: order }), env, ctx)).status, 200);
+  assert.equal((await worker.fetch(post('/api/pro', { csv, sb_order: order }), { ...env, PAYPAL_SB_BUTTONS: 'off' }, ctx)).status, 402);
+});

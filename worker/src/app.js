@@ -309,7 +309,9 @@ export default {
           const mode = paymentMode(env);
           const payments = { mode, price: price(env), currency: 'USD',
             label: { braintree: 'Braintree Sandbox (PayPal)', server: 'PayPal Sandbox', sb: 'Payments demo mode · PayPal sandbox (sb)', mock: 'Payments demo mode' }[mode],
-            client_id: mode === 'server' ? env.PAYPAL_CLIENT_ID : mode === 'sb' ? 'sb' : null };
+            client_id: mode === 'server' ? env.PAYPAL_CLIENT_ID : mode === 'sb' ? 'sb' : null,
+            // Braintree mode also offers PayPal Checkout buttons (generic sandbox client id) unless PAYPAL_SB_BUTTONS=off
+            paypal_checkout: mode === 'braintree' && String(env.PAYPAL_SB_BUTTONS || 'on').toLowerCase() !== 'off' };
           return json({
             ai: { model: AI_MODEL, binding: Boolean(env.AI) },
             payments,
@@ -362,7 +364,9 @@ export default {
             const fp = await fingerprint(input);
             const mode = paymentMode(env);
             let v;
-            if (mode === 'braintree') v = await getTransaction(env, String(body.bt_transaction || '')).then(t => checkTxn(t, fp, env)).catch(e => ({ ok: false, reason: e.message }));
+            const sbAlso = mode === 'braintree' && String(env.PAYPAL_SB_BUTTONS || 'on').toLowerCase() !== 'off';
+            if (mode === 'braintree' && body.sb_order && sbAlso) v = verifySbOrder(body.sb_order, fp, env);
+            else if (mode === 'braintree') v = await getTransaction(env, String(body.bt_transaction || '')).then(t => checkTxn(t, fp, env)).catch(e => ({ ok: false, reason: e.message }));
             else if (mode === 'server') v = await verifyOrder(env, String(body.order_id || ''), fp).catch(e => ({ ok: false, reason: e.message }));
             else if (mode === 'sb') v = verifySbOrder(body.sb_order, fp, env);
             else v = body.demo === true ? { ok: true } : { ok: false, reason: 'send demo=true for the mock unlock' };

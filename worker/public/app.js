@@ -124,6 +124,7 @@ function render(res) {
 
 /* Pro */
 function resetPro() {
+  $('#ppCheckout').classList.add('hidden'); $('#ppButtons').innerHTML = '';
   $('#proBody').classList.add('hidden'); $('#printBtn').classList.add('hidden'); $('#reportCard').classList.remove('hidden');
   $('#payNote').classList.add('hidden'); $('#paypalButtons').innerHTML = '';
   const pay = cfg ? cfg.payments : { mode: 'mock', price: '4.99' };
@@ -131,8 +132,12 @@ function resetPro() {
     $('#demoBtn').classList.add('hidden');
     note(`Braintree Sandbox (a PayPal service) · $${pay.price} test money · pay with the sandbox test card 4111 1111 1111 1111 (any future date, any CVV). Charged and verified on the server.`);
     window.BotlabBT.mount({ container: '#paypalButtons', fingerprint: last.fingerprint, nonce: NONCE, onNote: note,
-      onPaid: async t => { note('Payment captured (Braintree sandbox transaction ' + t.id + '). Writing the Pro audit…'); await runPro({ bt_transaction: t.id }, t.id); } })
+      onPaid: async t => { $('#ppCheckout').classList.add('hidden'); note('Payment captured (Braintree sandbox transaction ' + t.id + '). Writing the Pro audit…'); await runPro({ bt_transaction: t.id }, t.id); } })
       .catch(e => note('Could not load the Braintree checkout: ' + e.message));
+    if (pay.paypal_checkout) {
+      $('#ppCheckout').classList.remove('hidden');
+      loadPayPal({ client_id: 'sb' }).then(() => renderButtons('sb', '#ppButtons')).catch(e => note('Could not load PayPal: ' + e.message));
+    }
     return;
   }
   if (pay.mode === 'server' || pay.mode === 'sb') {
@@ -160,13 +165,13 @@ function loadPayPal(pay) {
   });
 }
 
-function renderButtons(mode) {
+function renderButtons(mode, container = '#paypalButtons') {
   if (!window.paypal || !last) return;
-  $('#paypalButtons').innerHTML = '';
+  $(container).innerHTML = '';
   const amount = cfg.payments.price;
   const server = mode === 'server';
   window.paypal.Buttons({
-    style: { layout: 'horizontal', tagline: false, height: 40 },
+    style: { layout: 'vertical', height: 44 },   // vertical: PayPal wallet + PayPal's own "Debit or Credit Card" (guest) button
     createOrder: async (data, actions) => {
       if (!server) {
         // 'sb' mode: no credentials, the SDK creates the sandbox order in the browser.
@@ -196,7 +201,7 @@ function renderButtons(mode) {
     },
     onCancel: () => note('Payment cancelled.'),
     onError: e => note('PayPal error: ' + (e && e.message ? e.message : e)),
-  }).render('#paypalButtons');
+  }).render(container);
 }
 
 $('#demoBtn').onclick = async () => { $('#demoBtn').disabled = true; note('Demo unlock: writing the Pro audit…'); await runPro({ demo: true }); $('#demoBtn').disabled = false; };
@@ -212,7 +217,7 @@ async function runPro(extra, orderId) {
 }
 
 function renderPro(res) {
-  $('#demoBtn').classList.add('hidden'); $('#paypalButtons').innerHTML = '';
+  $('#demoBtn').classList.add('hidden'); $('#paypalButtons').innerHTML = ''; $('#ppCheckout').classList.add('hidden');
   $('#reportCard').classList.add('hidden');
   $('#proBody').classList.remove('hidden'); $('#printBtn').classList.remove('hidden');
   $('#proReport').innerHTML = md(res.report || '');
