@@ -1,5 +1,6 @@
 # BOTLAB Bot Log Auditor - hosted hackathon demo.
-# Standalone Worker on *.workers.dev. No routes on botlab.org.uk, no KV/D1/R2: nothing is stored.
+# Standalone Worker on *.workers.dev. No routes on botlab.org.uk. Uploaded CSVs are never stored;
+# the only optional storage is the RECEIPTS KV below (payment receipts).
 name = "botlab-auditor"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
@@ -25,6 +26,15 @@ PAYPAL_MODE = "sb"
 #   PAYPAL_CLIENT_ID       PayPal Developer *sandbox* REST app client id
 #   PAYPAL_CLIENT_SECRET   PayPal Developer *sandbox* REST app secret
 # Without them the UI shows "Payments demo mode" and uses PAYPAL_MODE (sb buttons or mock unlock).
+#   PAYPAL_WEBHOOK_ID      id of the sandbox webhook pointing at https://<worker>/api/paypal/webhook
+#                          (events: PAYMENT.CAPTURE.COMPLETED). Without it /api/paypal/webhook answers 503.
+
+# Optional receipts store (payment ids, amount, input fingerprint - never the CSV). Create it with
+#   npx wrangler kv namespace create RECEIPTS
+# then uncomment and paste the id. Without it receipts are looked up live from PayPal.
+# [[kv_namespaces]]
+# binding = "RECEIPTS"
+# id = "<paste id>"
 
 [observability]
 enabled = false

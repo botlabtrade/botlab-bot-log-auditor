@@ -81,18 +81,64 @@ async function call(env, method, path, body, requestId, fetchImpl) {
 
 const ORDER_ID_RE = /^[A-Za-z0-9-_]{6,40}$/;
 
-export async function createOrder(env, fingerprint, fetchImpl) {
+/**
+ * Create a sandbox order bound to one audited input (custom_id = fingerprint).
+ * opts.returnUrl / opts.cancelUrl: used by the agent flow, where the buyer approves on PayPal's own page
+ * (approve_url) instead of the JS SDK popup. opts.agent: free-text label of the buying agent (soft_descriptor-safe).
+ */
+export async function createOrder(env, fingerprint, fetchImpl, opts = {}) {
   if (!/^[a-f0-9]{64}$/.test(fingerprint || '')) throw new Error('bad fingerprint');
+  const ctx = { brand_name: 'BOTLAB Auditor', user_action: 'PAY_NOW', shipping_preference: 'NO_SHIPPING' };
+  if (opts.returnUrl) ctx.return_url = opts.returnUrl;
+  if (opts.cancelUrl) ctx.cancel_url = opts.cancelUrl;
+  const agent = String(opts.agent || '').replace(/[^A-Za-z0-9 ._-]/g, '').slice(0, 40);
   const body = {
     intent: 'CAPTURE',
     purchase_units: [{
-      reference_id: 'pro-audit', custom_id: fingerprint.slice(0, 64), description: 'BOTLAB Pro audit (sandbox demo)',
+      reference_id: 'pro-audit', custom_id: fingerprint.slice(0, 64),
+      description: agent ? `BOTLAB Pro audit for agent ${agent} (sandbox)` : 'BOTLAB Pro audit (sandbox demo)',
       amount: { currency_code: 'USD', value: price(env) },
     }],
-    payment_source: { paypal: { experience_context: { brand_name: 'BOTLAB Auditor', user_action: 'PAY_NOW', shipping_preference: 'NO_SHIPPING' } } },
+    payment_source: { paypal: { experience_context: ctx } },
   };
   const data = await call(env, 'POST', '/v2/checkout/orders', body, crypto.randomUUID(), fetchImpl);
-  return { id: data.id, status: data.status };
+  const link = (data.links || []).find(l => l.rel === 'payer-action' || l.rel === 'approve');
+  return { id: data.id, status: data.status, approve_url: link ? link.href : null };
+}
+
+/** Read an order (status + the fields we bind to). */
+export async function getOrder(env, orderId, fetchImpl) {
+  if (!ORDER_ID_RE.test(orderId || '')) throw new Error('bad order id');
+  const data = await call(env, 'GET', `/v2/checkout/orders/${encodeURIComponent(orderId)}`, null, null, fetchImpl);
+  const pu = (data.purchase_units || [])[0] || {};
+  const cap = (((pu.payments || {}).captures) || [])[0] || {};
+  const link = (data.links || []).find(l => l.rel === 'payer-action' || l.rel === 'approve');
+  return { id: data.id || orderId, status: data.status, custom_id: pu.custom_id || null,
+    capture_id: cap.id || null, amount: cap.amount || pu.amount || null, approve_url: link ? link.href : null };
+}
+
+/**
+ * Verify a webhook delivery with PayPal (POST /v1/notifications/verify-webhook-signature).
+ * Needs PAYPAL_WEBHOOK_ID (the sandbox webhook's id). Returns true only on verification_status SUCCESS.
+ */
+export async function verifyWebhook(env, headers, event, fetchImpl) {
+  if (!env.PAYPAL_WEBHOOK_ID) return false;
+  const h = k => headers.get(k) || '';
+  const body = {
+    auth_algo: h('paypal-auth-algo'), cert_url: h('paypal-cert-url'), transmission_id: h('paypal-transmission-id'),
+    transmission_sig: h('paypal-transmission-sig'), transmission_time: h('paypal-transmission-time'),
+    webhook_id: env.PAYPAL_WEBHOOK_ID, webhook_event: event,
+  };
+  if (!body.transmission_id || !body.transmission_sig) return false;
+  const data = await call(env, 'POST', '/v1/notifications/verify-webhook-signature', body, null, fetchImpl);
+  return data.verification_status === 'SUCCESS';
+}
+
+/** The receipt we keep for a paid order: ids, amount, the input fingerprint. Never the CSV. */
+export function receiptFrom(order, source) {
+  return { order_id: order.id, capture_id: order.capture_id || null, status: order.status,
+    amount: order.amount ? `${order.amount.value} ${order.amount.currency_code}` : null,
+    fingerprint: order.custom_id || null, source, at: new Date().toISOString(), sandbox: true };
 }
 
 export async function captureOrder(env, orderId, fetchImpl) {

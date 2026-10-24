@@ -7,6 +7,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232448D8'/%3E%3Cpath d='M7 21l5-6 4 3 7-9' stroke='%2335C9A9' stroke-width='3' fill='none'/%3E%3C/svg%3E">
 <meta name="description" content="Upload a trading bot's trade history. An AI agent runs six statistical gates and writes a plain-English audit. Educational tool, not financial advice.">
 <link rel="stylesheet" href="/styles.css">
+<script src="/vendor/ag-grid-community.min.js" defer nonce="__CSP_NONCE__"></script>
 <script src="/app.js" defer nonce="__CSP_NONCE__"></script>
 </head>
 <body>
@@ -94,8 +95,10 @@
       <div id="proBody" class="hidden">
         <div class="report" id="proReport" style="margin-top:14px"></div>
         <h2 style="margin-top:18px">Month by month</h2>
+        <div id="monthGrid" class="grid no-print"></div>
         <div class="tbl"><table id="monthTable"><thead><tr><th>Month</th><th style="text-align:right">Trades</th><th style="text-align:right">Result</th><th style="text-align:right">Green days</th><th style="text-align:right">Red days</th></tr></thead><tbody></tbody></table></div>
         <h2 style="margin-top:18px">Per coin</h2>
+        <div id="coinGrid" class="grid no-print"></div>
         <div class="tbl"><table id="coinTable"><thead><tr><th>Coin</th><th style="text-align:right">Trades</th><th style="text-align:right">Win rate</th><th style="text-align:right">Result</th></tr></thead><tbody></tbody></table></div>
         <p class="hint" id="sideNote"></p>
       </div>

@@ -184,3 +184,104 @@ test('static assets get security headers', async () => {
   assert.ok(nonce.length >= 16 && nonce !== '__CSP_NONCE__');
   assert.ok(res.headers.get('content-security-policy').includes(`'nonce-${nonce}'`));
 });
+
+/* ---------------------------------------------------------------- agentic commerce, receipts, webhooks */
+const memKV = () => { const m = new Map(); return { m, get: async k => m.get(k) ?? null, put: async (k, v) => { m.set(k, v); } }; };
+
+test('agent manifest describes the buy flow and the human approval', async () => {
+  const j = await (await worker.fetch(new Request('https://x.test/api/agent/manifest'), {}, ctx)).json();
+  assert.equal(j.payment.provider, 'PayPal');
+  assert.deepEqual(j.flow.map(f => f.step), ['quote', 'approve', 'fulfil', 'receipt']);
+  assert.match(j.payment.human_approval, /approved by a human/);
+});
+
+test('agent quote/fulfil in mock mode: budget guard, free summary, paid Pro audit bound to the file', async () => {
+  const env = { PAYPAL_MODE: 'mock' };
+  const csv = sample('synthetic_42_trades_small_lucky.csv');
+  const over = await worker.fetch(post('/api/agent/quote', { csv, max_price_usd: 1 }), env, ctx);
+  assert.equal(over.status, 402);
+  assert.match((await over.json()).error, /Over budget/);
+  const q = await (await worker.fetch(post('/api/agent/quote', { csv, agent: 'fastbot-5m', max_price_usd: 10 }), env, ctx)).json();
+  assert.equal(q.quote.passed, 3);
+  assert.equal(q.quote.report, undefined, 'quote carries numbers only');
+  assert.match(q.payment.order_id, /^MOCK-/);
+  const bad = await worker.fetch(post('/api/agent/fulfil', { csv: sample('synthetic_640_trades_passes.csv'), order_id: q.payment.order_id }), env, ctx);
+  assert.equal(bad.status, 402, 'order bound to a different file');
+  const f = await (await worker.fetch(post('/api/agent/fulfil', { csv, order_id: q.payment.order_id }), env, ctx)).json();
+  assert.equal(f.status, 'fulfilled');
+  assert.equal(f.audit.pro, true);
+  assert.ok(Array.isArray(f.audit.analysis.monthly));
+  assert.equal(f.receipt.fingerprint, q.fingerprint);
+});
+
+test('agent checkout is refused in sb mode (needs server-side PayPal)', async () => {
+  const r = await worker.fetch(post('/api/agent/quote', { csv: sample('synthetic_42_trades_small_lucky.csv') }), {}, ctx);
+  assert.equal(r.status, 503);
+});
+
+test('agent flow with PayPal sandbox: awaiting approval -> capture -> receipt stored in KV', async () => {
+  const kv = memKV();
+  const env = { PAYPAL_CLIENT_ID: 'cid', PAYPAL_CLIENT_SECRET: 'sec', RECEIPTS: kv };
+  const csv = sample('synthetic_42_trades_small_lucky.csv');
+  let fp = null, status = 'PAYER_ACTION_REQUIRED', created = null, captured = 0;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (url.endsWith('/v1/oauth2/token')) return Response.json({ access_token: 'T', expires_in: 300 });
+    if (url.endsWith('/v2/checkout/orders') && init.method === 'POST') {
+      created = JSON.parse(init.body); fp = created.purchase_units[0].custom_id;
+      return Response.json({ id: 'AGENT1', status: 'PAYER_ACTION_REQUIRED', links: [{ rel: 'payer-action', href: 'https://www.sandbox.paypal.com/checkoutnow?token=AGENT1' }] }, { status: 201 });
+    }
+    if (url.endsWith('/AGENT1/capture')) { captured++; status = 'COMPLETED'; return Response.json({ id: 'AGENT1', status }, { status: 201 }); }
+    if (url.includes('/v2/checkout/orders/AGENT1')) return Response.json({ id: 'AGENT1', status,
+      links: [{ rel: 'payer-action', href: 'https://www.sandbox.paypal.com/checkoutnow?token=AGENT1' }],
+      purchase_units: [{ custom_id: fp, amount: { currency_code: 'USD', value: '4.99' },
+        payments: status === 'COMPLETED' ? { captures: [{ id: 'CAPA', amount: { currency_code: 'USD', value: '4.99' } }] } : undefined }] });
+    return new Response('{}', { status: 404 });
+  };
+  try {
+    paypal._resetTokenCache();
+    const q = await (await worker.fetch(post('/api/agent/quote', { csv, agent: 'fastbot-5m!<x>' }), env, ctx)).json();
+    assert.equal(q.payment.order_id, 'AGENT1');
+    assert.match(q.payment.approve_url, /sandbox\.paypal\.com/);
+    assert.equal(created.payment_source.paypal.experience_context.return_url, 'https://x.test/paid.html');
+    assert.match(created.purchase_units[0].description, /agent fastbot-5mx/);
+    const wait = await worker.fetch(post('/api/agent/fulfil', { csv, order_id: 'AGENT1' }), env, ctx);
+    assert.equal(wait.status, 202);
+    assert.equal((await wait.json()).status, 'awaiting_approval');
+    status = 'APPROVED';                                         // the human approved on PayPal
+    const f = await (await worker.fetch(post('/api/agent/fulfil', { csv, order_id: 'AGENT1' }), env, ctx)).json();
+    assert.equal(captured, 1);
+    assert.equal(f.status, 'fulfilled');
+    assert.equal(f.receipt.capture_id, 'CAPA');
+    assert.ok(kv.m.has('order:AGENT1'));
+    assert.ok(!kv.m.get('order:AGENT1').includes('date,') && !kv.m.get('order:AGENT1').includes('symbol'), 'no CSV in the receipt');
+    const r = await (await worker.fetch(new Request('https://x.test/api/receipt?order_id=AGENT1'), env, ctx)).json();
+    assert.equal(r.amount, '4.99 USD');
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('webhook: refused without PAYPAL_WEBHOOK_ID or a verified signature; stores the receipt when verified', async () => {
+  const kv = memKV();
+  const ev = { id: 'WH-1', event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: { id: 'CAP9', custom_id: 'a'.repeat(64),
+    amount: { currency_code: 'USD', value: '4.99' }, supplementary_data: { related_ids: { order_id: 'ORD9' } } } };
+  const hdr = { 'paypal-transmission-id': 't1', 'paypal-transmission-sig': 's', 'paypal-auth-algo': 'SHA256withRSA',
+    'paypal-cert-url': 'https://api.sandbox.paypal.com/cert', 'paypal-transmission-time': '2026-11-01T00:00:00Z' };
+  assert.equal((await worker.fetch(post('/api/paypal/webhook', ev, hdr), { PAYPAL_CLIENT_ID: 'c', PAYPAL_CLIENT_SECRET: 's' }, ctx)).status, 503);
+  const env = { PAYPAL_CLIENT_ID: 'c', PAYPAL_CLIENT_SECRET: 's', PAYPAL_WEBHOOK_ID: 'WHID', RECEIPTS: kv };
+  let verdict = 'FAILURE', sent = null;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (url.endsWith('/v1/oauth2/token')) return Response.json({ access_token: 'T', expires_in: 300 });
+    if (url.endsWith('/v1/notifications/verify-webhook-signature')) { sent = JSON.parse(init.body); return Response.json({ verification_status: verdict }); }
+    return new Response('{}', { status: 404 });
+  };
+  try {
+    paypal._resetTokenCache();
+    assert.equal((await worker.fetch(post('/api/paypal/webhook', ev, hdr), env, ctx)).status, 401);
+    assert.equal(sent.webhook_id, 'WHID');
+    verdict = 'SUCCESS';
+    const ok = await worker.fetch(post('/api/paypal/webhook', ev, hdr), env, ctx);
+    assert.equal(ok.status, 200);
+    assert.equal(JSON.parse(kv.m.get('order:ORD9')).source, 'webhook');
+  } finally { globalThis.fetch = realFetch; }
+});

@@ -10,6 +10,15 @@ The paid "Pro audit" (PayPal Sandbox) adds a longer report and a PDF export.
 
 **Live demo:** https://botlab-auditor.botsite.workers.dev · **Video (2:45):** https://youtu.be/oQc5DGtB8RY
 
+## Built and operated by AI
+
+BOTLAB is a one-founder project that is **run day to day by AI agents**. Claude-based agents write and
+test the code (including this auditor), run the strategy research and backtests, operate the
+paper-trading bots, monitor the live bots, and draft reports and posts. The human founder sets the
+direction and approves every action that involves real money, accounts, publishing or production
+changes. This repository was built the same way: the founder decided the scope; AI agents wrote the
+code, the tests and the docs.
+
 ## How PayPal and AI are used (PayPal AI Hackathon)
 
 | Tool | Where | What it does |
@@ -18,11 +27,44 @@ The paid "Pro audit" (PayPal Sandbox) adds a longer report and a PDF export.
 | **PayPal Orders v2 REST API** (sandbox) | `worker/src/paypal.js`, `payments_paypal.py` | Server-side create order → buyer approves → server capture → Pro unlocked. Active when `PAYPAL_CLIENT_ID` / `PAYPAL_CLIENT_SECRET` sandbox secrets are set (`npx wrangler secret put …`). |
 | **Cloudflare Workers AI – Llama 3.3 70B Instruct** | `worker/src/report.js` | Writes the plain-English audit (verdict, failed gates and why, what to test next, risk warnings) and answers follow-up questions, grounded in the gate numbers. Falls back to a deterministic template if the model errors or drifts into advice. |
 | **Python agent + sandbox** (any LLM: Anthropic or OpenAI-compatible) | `agent.py`, `sandbox.py`, `llm.py` | Full agent version: the LLM maps unknown CSV columns and writes analysis code that runs in a restricted sandbox (no network, no subprocess, temp dir, timeout). |
+| **PayPal Orders v2 for AI agents** (agentic commerce) | `worker/src/app.js` (`/api/agent/*`), `agent_buyer.py` | Another AI agent (e.g. a trading bot) discovers the service (`/api/agent/manifest`), gets a free gate summary and a PayPal order within its budget (`/api/agent/quote`), its human owner approves the spend on PayPal, then the agent captures and collects the Pro audit (`/api/agent/fulfil`). |
+| **PayPal Webhooks** (sandbox) | `worker/src/paypal.js` `verifyWebhook`, `/api/paypal/webhook` | `PAYMENT.CAPTURE.COMPLETED` events are signature-verified with PayPal (`verify-webhook-signature`) and stored as receipts. |
+| **Receipts** | `/api/receipt?order_id=` | Order id, capture id, amount and the input fingerprint (never the CSV), from the optional `RECEIPTS` KV or looked up live from PayPal, so a paid audit can always be re-issued. |
+| **AG Grid Community** (MIT) | `worker/public/vendor/`, `worker/public/app.js` | Sortable, filterable month-by-month (green/red days) and per-coin grids in the Pro audit; plain tables are kept for print/PDF. |
 | **Cloudflare Workers** | `worker/` | Stateless hosting; uploaded files are processed in memory and never stored. |
 
 Setup: hosted version → see [`worker/README.md`](worker/README.md) (`npm install`, `npx wrangler deploy`); Python version → [Run locally](#run-locally) below.
 
 ![screenshot](docs/screenshots/audit_desktop_dark.png)
+
+## Agentic commerce: an AI agent buys an audit
+
+Trading bots are increasingly run by AI agents. Before an agent risks money on a strategy, it should
+buy an independent check of that strategy, and a human should approve the spend. The flow:
+
+```
+agent  --GET  /api/agent/manifest-->  service, price, flow, policy
+agent  --POST /api/agent/quote  -->  free 6-gate summary + offer (4.99 USD) + PayPal order {order_id, approve_url}
+                                      (refused with 402 if the price is above the agent's max_price_usd)
+human  --approves approve_url on PayPal (sandbox)-->  return page /paid.html
+agent  --POST /api/agent/fulfil -->  202 awaiting_approval ... then: server captures, verifies the order is bound
+                                      to this exact file (custom_id = SHA-256 fingerprint) -> {receipt, Pro audit}
+```
+
+Try it (standard library only):
+
+```bash
+python agent_buyer.py --api https://botlab-auditor.botsite.workers.dev \
+  --csv samples/synthetic_42_trades_small_lucky.csv --agent fastbot-5m --max-price 5
+```
+
+The agent prints the PayPal approve link, waits for the approval, collects the Pro audit and, if the
+edge is not proven, recommends pausing the book. On a deployment without PayPal keys and with
+`PAYPAL_MODE=mock`, the order is simulated so the flow can be tried offline.
+
+**For judges (sandbox only, test money):** log in on the PayPal checkout with the sandbox buyer
+account `<sandbox buyer email>` / `<sandbox buyer password>` (a PayPal Developer test account, not a
+real one).
 
 ## The problem
 
@@ -110,7 +152,8 @@ never passed to sandboxed code.
 
 This project builds on botlab-check-your-bot.
 
-**New for this project** (written October 2026):
+**New for this project** (written October–November 2026, i.e. inside the PayPal AI Hackathon
+submission period that began 1 Oct 2026):
 - `gates.py`, a numerically identical Python port (verified against gates.js in tests)
 - the agent pipeline
 - exchange CSV normalisation (Bybit, Binance, generic, LLM fallback)
@@ -120,11 +163,14 @@ This project builds on botlab-check-your-bot.
 - the PDF export
 - the web UI
 - the synthetic exchange samples
+- agentic commerce (`/api/agent/*`, `agent_buyer.py`), PayPal webhooks, receipts, AG Grid tables (24 Oct 2026)
 - the tests
 
 ## Tests
 
-`python -m pytest -q` runs 49 tests:
+`python -m pytest -q` runs 49 Python tests, and `cd worker && npm test` runs 35 Worker tests (including the
+agent quote/approve/capture flow, budget guard, file binding, webhook signature check and receipts, all with
+mocked PayPal). The Python tests cover:
 - parsing variants
 - parity with gates.js on the example CSVs and the normalised exchange exports
 - sandbox timeout, network, fs, subprocess and env isolation

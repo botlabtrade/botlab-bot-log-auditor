@@ -210,12 +210,44 @@ function renderPro(res) {
   $('#proReport').innerHTML = md(res.report || '');
   const a = res.analysis || {}, u = res.unit;
   const months = (a.monthly || []).filter(r => r.month !== 'unknown');
+  renderGrids(months, a.by_symbol || [], u);
   $('#monthTable tbody').innerHTML = months.length ? months.map(r => `<tr><td>${esc(r.month)}</td><td class="num">${r.n}</td><td class="num ${r.sum >= 0 ? 'green' : 'red'}">${fmt(r.sum, 2, true)} ${esc(u)}</td><td class="num green">${r.win_days}</td><td class="num red">${r.loss_days}</td></tr>`).join('') : '<tr><td colspan="5">No date column.</td></tr>';
   $('#coinTable tbody').innerHTML = (a.by_symbol || []).map(r => `<tr><td>${esc(r.sym)}</td><td class="num">${r.n}</td><td class="num">${r.wr}%</td><td class="num ${r.sum >= 0 ? 'green' : 'red'}">${fmt(r.sum, 2, true)} ${esc(u)}</td></tr>`).join('');
   const bs = a.by_side || {};
   $('#sideNote').textContent = `Longs: ${bs.L ? bs.L.n : 0} trades, ${fmt(bs.L ? bs.L.sum : 0, 2, true)} ${u} · Shorts: ${bs.S ? bs.S.n : 0} trades, ${fmt(bs.S ? bs.S.sum : 0, 2, true)} ${u} · Longest losing streak: ${a.longest_losing_streak} trades.`;
 }
 $('#printBtn').onclick = () => window.print();
+
+/* AG Grid (Community, MIT) for the Pro tables: sortable, filterable, resizable on screen.
+   The plain HTML tables stay as the print/PDF version and as the fallback if the grid script fails to load. */
+const grids = {};
+function gridTheme() {
+  const g = window.agGrid;
+  const cur = document.documentElement.dataset.theme;
+  const dark = cur ? cur === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  return dark ? g.themeQuartz.withPart(g.colorSchemeDarkBlue) : g.themeQuartz;
+}
+function makeGrid(id, columnDefs, rowData) {
+  const g = window.agGrid, el = document.getElementById(id);
+  if (!g || !g.createGrid || !el) return false;
+  if (grids[id]) { grids[id].destroy(); delete grids[id]; }
+  el.innerHTML = '';
+  if (g.ModuleRegistry && g.AllCommunityModule) { try { g.ModuleRegistry.registerModules([g.AllCommunityModule]); } catch (e) {} }
+  grids[id] = g.createGrid(el, { theme: gridTheme(), columnDefs, rowData, domLayout: 'autoHeight', animateRows: true,
+    defaultColDef: { sortable: true, filter: true, resizable: true, flex: 1, minWidth: 90 } });
+  return true;
+}
+function renderGrids(months, coins, u) {
+  const res = p => ({ valueFormatter: x => fmt(x.value, 2, true) + ' ' + u, cellClassRules: { green: x => x.value >= 0, red: x => x.value < 0 }, type: 'numericColumn', filter: 'agNumberColumnFilter' });
+  const num = { type: 'numericColumn', filter: 'agNumberColumnFilter' };
+  const okM = makeGrid('monthGrid', [{ field: 'month', headerName: 'Month', sort: 'asc' }, { field: 'n', headerName: 'Trades', ...num },
+    { field: 'sum', headerName: 'Result', ...res() }, { field: 'win_days', headerName: 'Green days', ...num, cellClass: 'green' },
+    { field: 'loss_days', headerName: 'Red days', ...num, cellClass: 'red' }], months);
+  const okC = makeGrid('coinGrid', [{ field: 'sym', headerName: 'Coin' }, { field: 'n', headerName: 'Trades', ...num },
+    { field: 'wr', headerName: 'Win rate %', ...num }, { field: 'sum', headerName: 'Result', ...res(), sort: 'desc' }], coins);
+  $('#monthTable').closest('.tbl').classList.toggle('screen-hide', okM);
+  $('#coinTable').closest('.tbl').classList.toggle('screen-hide', okC);
+}
 
 /* chat (stateless: the report and facts travel with every question) */
 $('#chatForm').onsubmit = async e => {

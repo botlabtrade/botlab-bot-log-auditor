@@ -116,3 +116,7 @@ footer a{color:inherit}
   .tbl{overflow:visible}
 }
 .print-only{display:none}
+.grid{width:100%;margin:6px 0 4px}
+.grid:empty{display:none}
+.screen-hide{display:none}
+@media print{.screen-hide{display:block!important}}

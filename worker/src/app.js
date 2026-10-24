@@ -2,7 +2,7 @@
  * BOTLAB Bot Log Auditor - hosted demo (Cloudflare Worker).
  *
  * Stateless: uploaded CSV text lives only in the memory of the request that processes it.
- * Nothing is written to KV, D1, R2, cache or logs.
+ * The CSV is never written anywhere. The only optional storage is the RECEIPTS KV (payment receipts: ids, amount, input fingerprint).
  *
  * MIT License (c) 2026 BOTLAB
  */
@@ -10,7 +10,7 @@ import { grade, parseCSV, GATE_TITLES, DEFAULTS } from './gates.js';
 import { normalize, sniffRows, heuristicMapping } from './normalize.js';
 import { analyse, crossCheck } from './analysis.js';
 import { buildFacts, writeReport, chat, AI_MODEL } from './report.js';
-import { paypalConfigured, paymentMode, price, createOrder, captureOrder, verifyOrder, verifySbOrder } from './paypal.js';
+import { paypalConfigured, paymentMode, price, createOrder, captureOrder, verifyOrder, verifySbOrder, getOrder, verifyWebhook, receiptFrom } from './paypal.js';
 
 export const MAX_CSV_BYTES = 2 * 1024 * 1024;
 export const MAX_BODY_BYTES = MAX_CSV_BYTES + 64 * 1024;
@@ -65,7 +65,7 @@ const err = (msg, status = 400) => json({ error: msg }, status);
 
 /* ---------------------------------------------------------------- rate limit (per isolate, best effort) */
 const buckets = new Map();
-const LIMITS = { audit: [20, 600], pro: [20, 600], chat: [40, 600], paypal: [30, 600] };
+const LIMITS = { audit: [20, 600], pro: [20, 600], chat: [40, 600], paypal: [30, 600], agent: [30, 600], webhook: [120, 600] };
 export function rateLimited(ip, kind, now = Date.now()) {
   const [max, win] = LIMITS[kind] || [60, 600];
   const key = kind + ':' + ip;
@@ -110,7 +110,7 @@ export async function fingerprint({ csv, trials, risk }) {
  * Runs parse -> normalise -> gates -> cross-check -> analysis -> report.
  * `emit(step)` is called on every step change (used for NDJSON streaming).
  */
-export async function runAudit(input, env, { pro = false, emit = () => {} } = {}) {
+export async function runAudit(input, env, { pro = false, quick = false, emit = () => {} } = {}) {
   const steps = STEPS.map(([id, label]) => ({ id, label, status: 'pending', detail: '', ms: null }));
   const t0 = {};
   const start = id => { const s = steps.find(x => x.id === id); s.status = 'running'; t0[id] = Date.now(); emit({ ...s }); };
@@ -149,6 +149,12 @@ export async function runAudit(input, env, { pro = false, emit = () => {} } = {}
 
   const facts = buildFacts(parsed, r, analysis, input.trials);
   start('report');
+  if (quick) {                                   // agent quote: numbers only, the AI report comes with the paid audit
+    done('report', 'skipped (quote only)', 'done');
+    return { pro: false, quick: true, steps, input: meta, unit: r.unit, verdict: r.verdict, passed: r.passed, total: r.total,
+      gates: Object.fromEntries(Object.entries(r.G).map(([g, v]) => [g, { title: GATE_TITLES[g], pass: v[0], detail: v[1] }])),
+      summary: s, fingerprint: await fingerprint(input) };
+  }
   const rep = await writeReport(env, facts, pro);
   done('report', `${rep.text.split(/\s+/).length} words · ${rep.source === 'workers-ai' ? 'Workers AI ' + rep.model : 'template fallback' + (rep.error ? ' (' + rep.error + ')' : '')}`,
     rep.source === 'workers-ai' ? 'done' : 'warn');
@@ -190,6 +196,94 @@ function streamAudit(input, env, ctx, opts) {
 
 const publicError = e => (e instanceof HttpError || /^(Need|Empty|Could not|Too many|CSV)/.test(String(e.message)) ? String(e.message) : 'Audit failed.');
 
+/* ---------------------------------------------------------------- receipts + agentic commerce */
+/** Optional KV binding RECEIPTS: keeps payment receipts (ids, amount, input fingerprint), never the CSV. */
+async function saveReceipt(env, r) {
+  if (!env.RECEIPTS || !r || !r.order_id) return;
+  try { await env.RECEIPTS.put('order:' + r.order_id, JSON.stringify(r), { expirationTtl: 90 * 86400 }); } catch { /* best effort */ }
+}
+async function loadReceipt(env, orderId) {
+  if (!env.RECEIPTS) return null;
+  try { const t = await env.RECEIPTS.get('order:' + orderId); return t ? JSON.parse(t) : null; } catch { return null; }
+}
+
+const MOCK_ID = fp => 'MOCK-' + fp.slice(0, 16);
+
+/** Machine-readable description so another AI agent can discover and buy an audit (agentic commerce). */
+export function agentManifest(origin, env) {
+  return {
+    name: 'BOTLAB Bot Log Auditor',
+    description: 'Statistical audit of a trading bot trade log: six gates (sample size, Deflated Sharpe, recency, concentration, losing side, drawdown) plus an AI-written report. Educational, not financial advice.',
+    payment: { provider: 'PayPal', environment: 'sandbox', currency: 'USD', price: price(env), mode: paymentMode(env),
+      human_approval: 'Each purchase is approved by a human on PayPal (approve_url) before the agent can collect the audit.' },
+    flow: [
+      { step: 'quote', method: 'POST', url: origin + '/api/agent/quote', body: '{csv, trials?, risk_usd?, agent?, max_price_usd}', returns: 'free gate summary + offer + PayPal order (order_id, approve_url)' },
+      { step: 'approve', who: 'the human owner of the agent', url: 'approve_url (PayPal sandbox checkout)' },
+      { step: 'fulfil', method: 'POST', url: origin + '/api/agent/fulfil', body: '{csv, trials?, risk_usd?, order_id}', returns: '202 awaiting_approval | 200 {receipt, audit}' },
+      { step: 'receipt', method: 'GET', url: origin + '/api/receipt?order_id=...' },
+    ],
+    limits: { max_csv_bytes: MAX_CSV_BYTES, max_trades: MAX_TRADES },
+    policy: 'Never gives buy/sell advice or profit predictions. The CSV is processed in memory and never stored.',
+  };
+}
+
+async function agentQuote(request, env, body) {
+  const input = auditInput(body);
+  const offerPrice = price(env);
+  if (body.max_price_usd != null && !(Number(body.max_price_usd) >= Number(offerPrice))) {
+    return json({ error: `Over budget: the Pro audit costs ${offerPrice} USD, max_price_usd is ${body.max_price_usd}.`, price: offerPrice }, 402);
+  }
+  const q = await runAudit(input, env, { quick: true });
+  const origin = new URL(request.url).origin;
+  const mode = paymentMode(env);
+  let payment;
+  if (mode === 'server') {
+    const o = await createOrder(env, q.fingerprint, undefined, { agent: body.agent,
+      returnUrl: origin + '/paid.html', cancelUrl: origin + '/paid.html?cancelled=1' });
+    payment = { mode, order_id: o.id, status: o.status, approve_url: o.approve_url };
+  } else if (mode === 'mock') {
+    const id = MOCK_ID(q.fingerprint);
+    payment = { mode, order_id: id, status: 'APPROVED', approve_url: origin + '/paid.html?mock=1&token=' + id,
+      note: 'Demo deployment without PayPal keys: the order is simulated and counts as approved.' };
+  } else {
+    return json({ error: 'Agent checkout needs server-side PayPal (sandbox keys) on this deployment.', fingerprint: q.fingerprint }, 503);
+  }
+  return json({
+    quote: { verdict: q.verdict, passed: q.passed, total: q.total, gates: q.gates, summary: q.summary, input: q.input, unit: q.unit },
+    fingerprint: q.fingerprint,
+    offer: { product: 'Pro audit: AI report, month-by-month green/red days, per-coin and per-side tables, robustness checklist', price: offerPrice, currency: 'USD' },
+    payment,
+    next: 'A human approves approve_url on PayPal; then POST the same csv/trials/risk_usd with order_id to /api/agent/fulfil.',
+  });
+}
+
+async function agentFulfil(env, body) {
+  const input = auditInput(body);
+  const fp = await fingerprint(input);
+  const orderId = String(body.order_id || '');
+  const mode = paymentMode(env);
+  let receipt;
+  if (mode === 'server') {
+    let o = await getOrder(env, orderId);
+    if (o.custom_id && o.custom_id !== fp) return err('Order was paid for a different file.', 402);
+    if (o.status === 'CREATED' || o.status === 'PAYER_ACTION_REQUIRED' || o.status === 'SAVED') {
+      return json({ status: 'awaiting_approval', order_id: orderId, approve_url: o.approve_url }, 202);
+    }
+    if (o.status === 'APPROVED') { await captureOrder(env, orderId); o = await getOrder(env, orderId); }
+    const v = await verifyOrder(env, orderId, fp);
+    if (!v.ok) return err('Pro not unlocked: ' + v.reason, 402);
+    receipt = receiptFrom(o, 'agent');
+    await saveReceipt(env, receipt);
+  } else if (mode === 'mock') {
+    if (orderId !== MOCK_ID(fp)) return err('Pro not unlocked: unknown mock order for this file.', 402);
+    receipt = { order_id: orderId, status: 'COMPLETED', amount: price(env) + ' USD', fingerprint: fp, source: 'agent-mock', at: new Date().toISOString(), sandbox: true };
+  } else {
+    return err('Agent checkout needs server-side PayPal (sandbox keys) on this deployment.', 503);
+  }
+  const audit = await runAudit(input, env, { pro: true });
+  return json({ status: 'fulfilled', receipt, audit });
+}
+
 /* ---------------------------------------------------------------- router */
 export default {
   async fetch(request, env, ctx) {
@@ -210,6 +304,18 @@ export default {
             gates: { G1_MIN_N: DEFAULTS.G1_MIN_N },
             samples: SAMPLES,
           });
+        }
+        if (path === '/api/agent/manifest' && request.method === 'GET') return json(agentManifest(url.origin, env));
+        if (path === '/api/receipt' && request.method === 'GET') {
+          const id = url.searchParams.get('order_id') || '';
+          if (!/^[A-Za-z0-9-_]{6,40}$/.test(id)) return err('bad order id');
+          let r = await loadReceipt(env, id);
+          if (!r && paymentMode(env) === 'server') {
+            const o = await getOrder(env, id);
+            if (o.status !== 'COMPLETED') return err('No completed payment for this order (status ' + o.status + ').', 404);
+            r = receiptFrom(o, 'paypal-lookup');
+          }
+          return r ? json(r) : err('No receipt for this order.', 404);
         }
         if (request.method !== 'POST') return err('Method not allowed.', 405);
         const ct = request.headers.get('content-type') || '';
@@ -244,12 +350,36 @@ export default {
           return json(await chat(env, { facts: body.facts, report: body.report, history: body.history, question }));
         }
 
+        if (path === '/api/paypal/webhook') {
+          if (rateLimited(ip, 'webhook')) return err('Too many webhook calls.', 429);
+          if (!paypalConfigured(env) || !env.PAYPAL_WEBHOOK_ID) return err('Webhooks are off (no sandbox keys / PAYPAL_WEBHOOK_ID).', 503);
+          const event = await readJson(request);
+          const ok = await verifyWebhook(env, request.headers, event).catch(() => false);
+          if (!ok) return err('Webhook signature not verified.', 401);
+          const res = (event && event.resource) || {};
+          if (event.event_type === 'PAYMENT.CAPTURE.COMPLETED') {
+            const orderId = (((res.supplementary_data || {}).related_ids) || {}).order_id;
+            if (orderId) await saveReceipt(env, { order_id: orderId, capture_id: res.id || null, status: 'COMPLETED',
+              amount: res.amount ? `${res.amount.value} ${res.amount.currency_code}` : null, fingerprint: res.custom_id || null,
+              source: 'webhook', event_id: event.id || null, at: new Date().toISOString(), sandbox: true });
+          }
+          return json({ received: true, event_type: event.event_type || null });
+        }
+
+        if (path === '/api/agent/quote' || path === '/api/agent/fulfil') {
+          if (rateLimited(ip, 'agent')) return err('Too many agent requests. Try again in a few minutes.', 429);
+          const body = await readJson(request);
+          return path === '/api/agent/quote' ? await agentQuote(request, env, body) : await agentFulfil(env, body);
+        }
+
         if (path === '/api/paypal/create' || path === '/api/paypal/capture') {
           if (rateLimited(ip, 'paypal')) return err('Too many payment requests.', 429);
           if (!paypalConfigured(env)) return err('Server-side PayPal is off (no sandbox keys configured).', 503);
           const body = await readJson(request);
           if (path === '/api/paypal/create') return json(await createOrder(env, String(body.fingerprint || '')));
-          return json(await captureOrder(env, String(body.order_id || '')));
+          const cap = await captureOrder(env, String(body.order_id || ''));
+          if (cap.completed) { try { await saveReceipt(env, receiptFrom(await getOrder(env, cap.id), 'checkout')); } catch { /* receipt is best effort */ } }
+          return json(cap);
         }
         return err('Not found.', 404);
       }
