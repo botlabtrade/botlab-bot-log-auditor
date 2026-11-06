@@ -8,7 +8,7 @@ The paid "Pro audit" (PayPal Sandbox) adds a longer report and a PDF export.
 
 > Educational tool. Not financial advice. It never tells you to trade, and it never promises profits.
 
-**Live demo:** https://botlab-auditor.botsite.workers.dev · **Video (2:45):** https://youtu.be/oQc5DGtB8RY
+**Live demo:** https://botlab-auditor.botsite.workers.dev · **Video (2:27):** https://youtu.be/tVyU5U3hTZ8
 
 ## Built and operated by AI
 
