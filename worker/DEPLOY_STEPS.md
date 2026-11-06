@@ -16,7 +16,7 @@ cd hackathon_auditor\worker
 npm install
 ```
 
-**2. Run the tests.** The result must be `pass 30` and `fail 0`.
+**2. Run the tests.** The result must be `pass 37` and `fail 0`.
 ```powershell
 npm test
 ```
