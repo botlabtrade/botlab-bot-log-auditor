@@ -130,7 +130,7 @@ function resetPro() {
   const pay = cfg ? cfg.payments : { mode: 'mock', price: '4.99' };
   if (pay.mode === 'braintree') {
     $('#demoBtn').classList.add('hidden');
-    note(`Braintree Sandbox (a PayPal service) · $${pay.price} test money · pay with the sandbox test card 4111 1111 1111 1111 (any future date, any CVV). Charged and verified on the server.`);
+    note(`Braintree Sandbox (a PayPal service) · $${pay.price} test money · pay with the sandbox test card 4111 1111 1111 1111 (any future date). Charged and verified on the server.`);
     window.BotlabBT.mount({ container: '#paypalButtons', fingerprint: last.fingerprint, nonce: NONCE, onNote: note,
       onPaid: async t => { $('#ppCheckout').classList.add('hidden'); note('Payment captured (Braintree sandbox transaction ' + t.id + '). Writing the Pro audit…'); await runPro({ bt_transaction: t.id }, t.id); } })
       .catch(e => note('Could not load the Braintree checkout: ' + e.message));
