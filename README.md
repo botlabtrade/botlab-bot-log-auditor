@@ -27,7 +27,7 @@ code, the tests and the docs.
 | **PayPal Orders v2 REST API** (sandbox) | `worker/src/paypal.js`, `payments_paypal.py` | Server-side create order → buyer approves → server capture → Pro unlocked. Active when `PAYPAL_CLIENT_ID` / `PAYPAL_CLIENT_SECRET` sandbox secrets are set (`npx wrangler secret put …`). |
 | **Cloudflare Workers AI – Llama 3.3 70B Instruct** | `worker/src/report.js` | Writes the plain-English audit (verdict, failed gates and why, what to test next, risk warnings) and answers follow-up questions, grounded in the gate numbers. Falls back to a deterministic template if the model errors or drifts into advice. |
 | **Python agent + sandbox** (any LLM: Anthropic or OpenAI-compatible) | `agent.py`, `sandbox.py`, `llm.py` | Full agent version: the LLM maps unknown CSV columns and writes analysis code that runs in a restricted sandbox (no network, no subprocess, temp dir, timeout). |
-| **Braintree (a PayPal service), sandbox** | `worker/src/braintree.js`, `worker/public/bt.js`, `worker/public/pay.html` | Used by the hosted demo. Drop-in UI (PayPal wallet or card) in the browser; the Worker charges the nonce through the Braintree GraphQL API with `orderId` = the input's SHA-256 fingerprint, then re-reads the transaction before unlocking Pro. Webhooks are verified with Braintree's HMAC signature. Test card: 4111 1111 1111 1111. |
+| **Braintree (a PayPal service), sandbox** | `worker/src/braintree.js`, `worker/public/bt.js`, `worker/public/pay.html` | Used by the hosted demo. Drop-in card form in the browser (the PayPal wallet appears once a PayPal sandbox account is linked); the Worker charges the nonce through the Braintree GraphQL API with `orderId` = the input's SHA-256 fingerprint, then re-reads the transaction before unlocking Pro. Webhooks are verified with Braintree's HMAC signature. Test card: 4111 1111 1111 1111. |
 | **PayPal Orders v2 for AI agents** (agentic commerce) | `worker/src/app.js` (`/api/agent/*`), `agent_buyer.py` | Another AI agent (e.g. a trading bot) discovers the service (`/api/agent/manifest`), gets a free gate summary and a PayPal order within its budget (`/api/agent/quote`), its human owner approves the spend on PayPal, then the agent captures and collects the Pro audit (`/api/agent/fulfil`). |
 | **PayPal Webhooks** (sandbox) | `worker/src/paypal.js` `verifyWebhook`, `/api/paypal/webhook` | `PAYMENT.CAPTURE.COMPLETED` events are signature-verified with PayPal (`verify-webhook-signature`) and stored as receipts. |
 | **Receipts** | `/api/receipt?order_id=` | Order id, capture id, amount and the input fingerprint (never the CSV), from the optional `RECEIPTS` KV or looked up live from PayPal, so a paid audit can always be re-issued. |
@@ -64,7 +64,7 @@ edge is not proven, recommends pausing the book. On a deployment without PayPal 
 `PAYPAL_MODE=mock`, the order is simulated so the flow can be tried offline.
 
 **For judges (sandbox only, test money):** on the hosted demo, pay with the Braintree test card
-**4111 1111 1111 1111** (any future expiry, any CVV), or use the **PayPal Checkout** buttons below it
+**4111 1111 1111 1111** (any future expiry), or use the **PayPal Checkout** buttons below it
 (PayPal JS SDK, sandbox): "Debit or Credit Card" opens PayPal's own guest checkout, where the same test card
 works. No real account or money is needed. With Braintree keys set, the agent's `approve_url`
 is our own `/pay.html` checkout, and `/api/agent/fulfil` finds the paid transaction by the file
@@ -172,7 +172,7 @@ submission period that began 1 Oct 2026):
 
 ## Tests
 
-`python -m pytest -q` runs 49 Python tests, and `cd worker && npm test` runs 35 Worker tests (including the
+`python -m pytest -q` runs 49 Python tests, and `cd worker && npm test` runs 37 Worker tests (including the
 agent quote/approve/capture flow, budget guard, file binding, webhook signature check and receipts, all with
 mocked PayPal). The Python tests cover:
 - parsing variants
